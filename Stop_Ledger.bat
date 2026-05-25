@@ -1,0 +1,6 @@
+@echo off
+echo Stopping Family Ledger Backend (port 8080)...
+for /f "tokens=5" %%a in ('netstat -aon ^| find "8080" ^| find "LISTENING"') do taskkill /F /PID %%a
+echo Stopping Family Ledger Frontend (port 5173)...
+for /f "tokens=5" %%a in ('netstat -aon ^| find "5173" ^| find "LISTENING"') do taskkill /F /PID %%a
+echo Done!
