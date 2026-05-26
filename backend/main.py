@@ -4,6 +4,7 @@ from pydantic import BaseModel
 import os
 import beancount.loader
 from beancount.core import realization
+from beancount.core import data
 
 app = FastAPI(title="Family Ledger API")
 
@@ -146,6 +147,31 @@ async def approve_ledger(req: LedgerApproveRequest):
             f.writelines(lines)
 
         return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/ledger/transactions")
+async def get_ledger_transactions(prefix: str):
+    try:
+        entries, errors, options_map = beancount.loader.load_file(LEDGER_PATH)
+        transactions = []
+        
+        for entry in entries:
+            if isinstance(entry, data.Transaction):
+                for posting in entry.postings:
+                    if posting.account.startswith(prefix):
+                        amount = posting.units.number if posting.units else 0.0
+                        transactions.append({
+                            "date": entry.date.isoformat(),
+                            "payee": entry.payee or "",
+                            "narration": entry.narration or "",
+                            "account": posting.account,
+                            "amount": float(amount)
+                        })
+                        
+        # Sort transactions newest to oldest
+        transactions.sort(key=lambda x: x['date'], reverse=True)
+        return transactions
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

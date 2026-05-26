@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import LedgerReviewWidget from './components/LedgerReviewWidget'
 import OverviewWidget from './components/OverviewWidget'
+import CategoryDetailWidget from './components/CategoryDetailWidget'
 import './index.css'
 
 const API_BASE = 'http://localhost:8080';
@@ -28,6 +29,18 @@ function App() {
     }
   };
 
+  const navButton = (viewId, icon, label) => {
+    const isActive = currentView === viewId;
+    return (
+      <button 
+        onClick={() => setCurrentView(viewId)}
+        className={`w-full flex items-center gap-3 p-3 text-sm font-bold uppercase tracking-widest rounded transition-all ${isActive ? 'bg-accent/10 text-accent border border-accent/30' : 'text-white/50 hover:bg-white/5 hover:text-white border border-transparent'}`}
+      >
+        <span className={isActive ? 'text-accent' : 'opacity-70'}>{icon}</span> {label}
+      </button>
+    );
+  };
+
   return (
     <div className="min-h-screen bg-black flex overflow-hidden text-white">
       {/* Sidebar Navigation */}
@@ -41,38 +54,52 @@ function App() {
           </div>
         </div>
         
-        <nav className="flex-1 p-4 space-y-2">
-          <button 
-            onClick={() => setCurrentView('overview')}
-            className={`w-full flex items-center gap-3 p-3 text-sm font-bold uppercase tracking-widest rounded transition-all ${currentView === 'overview' ? 'bg-accent/10 text-accent border border-accent/30' : 'text-white/50 hover:bg-white/5 hover:text-white'}`}
-          >
-            📊 Overview
-          </button>
-          <button 
-            onClick={() => setCurrentView('reviews')}
-            className={`w-full flex items-center justify-between p-3 text-sm font-bold uppercase tracking-widest rounded transition-all ${currentView === 'reviews' ? 'bg-accent/10 text-accent border border-accent/30' : 'text-white/50 hover:bg-white/5 hover:text-white'}`}
-          >
-            <div className="flex items-center gap-3">
-              📝 Reviews
-            </div>
-            {pendingCount > 0 && (
-              <span className="bg-red-500/20 text-red-400 border border-red-500/50 px-2 py-0.5 rounded text-[10px] animate-pulse">
-                {pendingCount}
-              </span>
-            )}
-          </button>
+        <nav className="flex-1 p-4 space-y-6 overflow-y-auto custom-scrollbar">
+          <div className="space-y-2">
+            <h3 className="text-[10px] font-black text-white/30 uppercase tracking-widest px-3 mb-2">Main</h3>
+            {navButton('overview', '📊', 'Overview')}
+            
+            <button 
+              onClick={() => setCurrentView('reviews')}
+              className={`w-full flex items-center justify-between p-3 text-sm font-bold uppercase tracking-widest rounded transition-all ${currentView === 'reviews' ? 'bg-accent/10 text-accent border border-accent/30' : 'text-white/50 hover:bg-white/5 hover:text-white border border-transparent'}`}
+            >
+              <div className="flex items-center gap-3">
+                <span className={currentView === 'reviews' ? 'text-accent' : 'opacity-70'}>📝</span> Reviews
+              </div>
+              {pendingCount > 0 && (
+                <span className="bg-red-500/20 text-red-400 border border-red-500/50 px-2 py-0.5 rounded text-[10px] animate-pulse">
+                  {pendingCount}
+                </span>
+              )}
+            </button>
+          </div>
+
+          <div className="space-y-2">
+            <h3 className="text-[10px] font-black text-white/30 uppercase tracking-widest px-3 mb-2">Accounts</h3>
+            {navButton('cat_bank_accounts', '🏦', 'Bank Accounts')}
+            {navButton('cat_retirement', '📈', 'Retirement')}
+            {navButton('cat_investments', '💹', 'Investments')}
+            {navButton('cat_credit_cards', '💳', 'Credit Cards')}
+          </div>
         </nav>
       </div>
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col h-screen overflow-y-auto custom-scrollbar">
-        <div className="p-12 max-w-5xl mx-auto w-full">
+        <div className="p-12 max-w-6xl mx-auto w-full">
           {currentView === 'overview' && <OverviewWidget onNavigateToReviews={() => setCurrentView('reviews')} />}
+          
           {currentView === 'reviews' && (
             <div className="bg-zinc-900/50 p-8 rounded-lg border border-white/5 shadow-2xl">
               <LedgerReviewWidget />
             </div>
           )}
+
+          {currentView === 'cat_bank_accounts' && <CategoryDetailWidget categoryKey="bank_accounts" title="Bank Accounts" icon="🏦" />}
+          {currentView === 'cat_retirement' && <CategoryDetailWidget categoryKey="retirement" title="Retirement" icon="📈" />}
+          {currentView === 'cat_investments' && <CategoryDetailWidget categoryKey="investments" title="Investments" icon="💹" />}
+          {currentView === 'cat_credit_cards' && <CategoryDetailWidget categoryKey="credit_cards" title="Credit Cards" icon="💳" isLiability={true} />}
+
         </div>
       </div>
     </div>
