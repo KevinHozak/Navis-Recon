@@ -17,7 +17,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-LEDGER_PATH = r"G:\My Drive\Navis-Protocol\Facilities\Vault\Ledger\Sovereign.beancount"
+LEDGER_PATH = r"G:\My Drive\Navis-Vault\Facilities\Vault\Ledger\Sovereign.beancount"
 
 class LedgerApproveRequest(BaseModel):
     line_num: int
