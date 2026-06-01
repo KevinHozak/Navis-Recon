@@ -6,6 +6,3 @@ WshShell.Run "cmd /c cd C:\Projects\Family-Ledger\frontend && npm run dev", 0, F
 
 ' Give Vite a moment to start up
 WScript.Sleep 2000
-
-' Launch the browser
-WshShell.Run "http://localhost:5173"
