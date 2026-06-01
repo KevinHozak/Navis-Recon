@@ -4,7 +4,7 @@ Family Ledger was spun out of the Navis ecosystem to serve as a focused, lightwe
 
 ## The Data Source
 The ultimate source of truth is a plain text file written in Beancount syntax:
-`G:\My Drive\Navis-Protocol\Facilities\Vault\Ledger\Sovereign.beancount`
+`G:\My Drive\Navis-Vault\Ledger\Sovereign.beancount`
 
 ## The Backend (FastAPI)
 Located in `backend/main.py`, the backend runs on port 8080 to avoid clashing with Navis-Web (which runs on 8000).
@@ -33,3 +33,14 @@ Located in `frontend/`, this is a React SPA running on port 5173.
 - **OverviewWidget.jsx**: The Dashboard. Fetches from `/api/ledger/summary` and visualizes the data.
 - **LedgerReviewWidget.jsx**: The Triage Queue. Fetches from `/api/ledger/pending`. Maps over pending transactions and provides an interface to approve them.
 - **CategorySelector.jsx**: A custom-built dropdown input that fuzzy-searches the available categories fetched from the backend.
+
+## Operational Mandates (Vault Protocol)
+Family Ledger adheres to the structural and operational mandates established in the original Vault Protocol:
+
+1. **Strict Chronology:** Statements must be archived using the format `[Institution] [YYYY-MM-DD].pdf`.
+2. **Directory Structure:** No financial PDFs are allowed in the root. Everything must be filed within the `G:\My Drive\Navis-Vault\Ledger\` root directory:
+   - `Statements/`: Archive of all income/expense reports.
+   - `Policies/`: Insurance, Taxes, and long-term contracts.
+   - `Sovereign.beancount`: Active tracking sheets and reconciliation reports.
+3. **Audit First:** Every monthly reconcile requires a cross-reference between the **Master Checklist** and the bank activity.
+4. **Security:** Never store plaintext passwords. Use Bitwarden Integration for all financial credentials.

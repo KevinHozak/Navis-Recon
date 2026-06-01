@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import LedgerReviewWidget from './components/LedgerReviewWidget'
 import OverviewWidget from './components/OverviewWidget'
 import CategoryDetailWidget from './components/CategoryDetailWidget'
+import VaultChecklist from './components/VaultChecklist'
 import './index.css'
 
 const API_BASE = 'http://localhost:8080';
@@ -58,6 +59,7 @@ function App() {
           <div className="space-y-2">
             <h3 className="text-[10px] font-black text-white/30 uppercase tracking-widest px-3 mb-2">Main</h3>
             {navButton('overview', '📊', 'Overview')}
+            {navButton('checklist', '⚖️', 'Checklist')}
             
             <button 
               onClick={() => setCurrentView('reviews')}
@@ -92,6 +94,12 @@ function App() {
           {currentView === 'reviews' && (
             <div className="bg-zinc-900/50 p-8 rounded-lg border border-white/5 shadow-2xl">
               <LedgerReviewWidget />
+            </div>
+          )}
+
+          {currentView === 'checklist' && (
+            <div className="bg-zinc-900/50 rounded-lg border border-white/5 shadow-2xl h-full">
+              <VaultChecklist />
             </div>
           )}
 

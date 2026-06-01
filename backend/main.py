@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
+import json
 import beancount.loader
 from beancount.core import realization
 from beancount.core import data
@@ -17,11 +18,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-LEDGER_PATH = r"G:\My Drive\Navis-Vault\Facilities\Vault\Ledger\Sovereign.beancount"
+LEDGER_PATH = r"G:\My Drive\Navis-Vault\Ledger\Sovereign.beancount"
+CHECKLIST_PATH = r"G:\My Drive\Navis-Vault\Ledger\checklist.json"
 
 class LedgerApproveRequest(BaseModel):
     line_num: int
     category: str
+
+@app.get("/api/vault/checklist")
+async def get_vault_checklist():
+    if os.path.exists(CHECKLIST_PATH):
+        with open(CHECKLIST_PATH, "r", encoding="utf-8-sig") as f:
+            return json.load(f)
+    return {"error": "checklist.json not found"}
+
+@app.post("/api/vault/checklist")
+async def save_vault_checklist(data: dict):
+    with open(CHECKLIST_PATH, "w", encoding="utf-8-sig") as f:
+        json.dump(data, f, indent=2)
+    return {"status": "success"}
 
 @app.get("/api/ledger/summary")
 async def get_ledger_summary():
