@@ -3,6 +3,7 @@ import LedgerReviewWidget from './components/LedgerReviewWidget'
 import OverviewWidget from './components/OverviewWidget'
 import CategoryDetailWidget from './components/CategoryDetailWidget'
 import VaultChecklist from './components/VaultChecklist'
+import SyncWidget from './components/SyncWidget'
 import './index.css'
 
 const API_BASE = 'http://localhost:8080';
@@ -59,6 +60,7 @@ function App() {
           <div className="space-y-2">
             <h3 className="text-[10px] font-black text-white/30 uppercase tracking-widest px-3 mb-2">Main</h3>
             {navButton('overview', '📊', 'Overview')}
+            {navButton('sync', '🔄', 'Sync & Import')}
             {navButton('checklist', '⚖️', 'Checklist')}
             
             <button 
@@ -100,6 +102,12 @@ function App() {
           {currentView === 'checklist' && (
             <div className="bg-zinc-900/50 rounded-lg border border-white/5 shadow-2xl h-full">
               <VaultChecklist />
+            </div>
+          )}
+
+          {currentView === 'sync' && (
+            <div className="h-full">
+              <SyncWidget />
             </div>
           )}
 

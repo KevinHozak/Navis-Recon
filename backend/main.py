@@ -1,8 +1,10 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
 import json
+import subprocess
 import beancount.loader
 from beancount.core import realization
 from beancount.core import data
@@ -127,7 +129,7 @@ async def get_ledger_categories():
     try:
         with open(LEDGER_PATH, "r", encoding="utf-8") as f:
             for line in f:
-                if line.startswith("20") and " open Expenses:" in line:
+                if line.startswith("20") and (" open Expenses:" in line or " open Income:" in line):
                     parts = line.split(" open ")
                     if len(parts) > 1:
                         cat = parts[1].split()[0]
@@ -189,6 +191,30 @@ async def get_ledger_transactions(prefix: str):
         return transactions
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/ledger/sync/stream")
+async def run_ledger_sync():
+    def generate():
+        script_path = r"C:\Users\khoza\.gemini\config\plugins\workflow-tools-plugin\skills\codex-harvester\scripts\finance_processor.py"
+        try:
+            # We use bufsize=1 and universal_newlines=True to get line-buffered output
+            process = subprocess.Popen(
+                ["python", script_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+            for line in iter(process.stdout.readline, ''):
+                yield f"data: {line}\n\n"
+            process.stdout.close()
+            process.wait()
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            yield f"data: Error: {str(e)}\n\n"
+            yield "data: [DONE]\n\n"
+            
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 if __name__ == "__main__":
     import uvicorn
