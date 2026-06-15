@@ -199,9 +199,9 @@ async def run_ledger_sync():
         try:
             # We use bufsize=1 and universal_newlines=True to get line-buffered output
             process = subprocess.Popen(
-                ["python", script_path, "--analyze"],
+                ["python", "-u", script_path, "--analyze"],
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stderr=subprocess.DEVNULL,
                 text=True,
                 bufsize=1
             )
