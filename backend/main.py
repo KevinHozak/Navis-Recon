@@ -199,7 +199,7 @@ async def run_ledger_sync():
         try:
             # We use bufsize=1 and universal_newlines=True to get line-buffered output
             process = subprocess.Popen(
-                ["python", script_path],
+                ["python", script_path, "--analyze"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -215,6 +215,32 @@ async def run_ledger_sync():
             yield "data: [DONE]\n\n"
             
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+@app.post("/api/ledger/sync/commit")
+async def commit_ledger_sync(payload: list):
+    try:
+        script_path = r"C:\Users\khoza\.gemini\config\plugins\workflow-tools-plugin\skills\codex-harvester\scripts\finance_processor.py"
+        # Run subprocess and pass payload via stdin
+        process = subprocess.Popen(
+            ["python", script_path, "--commit"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        stdout, stderr = process.communicate(input=json.dumps(payload))
+        
+        results = []
+        for line in stdout.splitlines():
+            if line.strip():
+                try:
+                    results.append(json.loads(line))
+                except:
+                    results.append({"type": "log", "message": line})
+        
+        return {"status": "success", "results": results, "stderr": stderr}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn

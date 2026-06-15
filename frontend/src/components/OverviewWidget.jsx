@@ -127,6 +127,7 @@ export default function OverviewWidget({ onNavigateToReviews }) {
       </div>
       
       <button 
+        type="button"
         onClick={onNavigateToReviews}
         className="w-full mt-4 p-4 bg-accent/10 border border-accent/40 text-accent font-bold uppercase tracking-widest rounded hover:bg-accent hover:text-black transition-all flex items-center justify-center gap-2"
       >

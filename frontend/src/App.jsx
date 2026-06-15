@@ -35,6 +35,7 @@ function App() {
     const isActive = currentView === viewId;
     return (
       <button 
+        type="button"
         onClick={() => setCurrentView(viewId)}
         className={`w-full flex items-center gap-3 p-3 text-sm font-bold uppercase tracking-widest rounded transition-all ${isActive ? 'bg-accent/10 text-accent border border-accent/30' : 'text-white/50 hover:bg-white/5 hover:text-white border border-transparent'}`}
       >
@@ -64,6 +65,7 @@ function App() {
             {navButton('checklist', '⚖️', 'Checklist')}
             
             <button 
+              type="button"
               onClick={() => setCurrentView('reviews')}
               className={`w-full flex items-center justify-between p-3 text-sm font-bold uppercase tracking-widest rounded transition-all ${currentView === 'reviews' ? 'bg-accent/10 text-accent border border-accent/30' : 'text-white/50 hover:bg-white/5 hover:text-white border border-transparent'}`}
             >
