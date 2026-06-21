@@ -4,6 +4,7 @@ import OverviewWidget from './components/OverviewWidget'
 import CategoryDetailWidget from './components/CategoryDetailWidget'
 import VaultChecklist from './components/VaultChecklist'
 import SyncWidget from './components/SyncWidget'
+import WealthDashboardWidget from './components/WealthDashboardWidget'
 import './index.css'
 
 const API_BASE = 'http://localhost:8080';
@@ -61,6 +62,7 @@ function App() {
           <div className="space-y-2">
             <h3 className="text-[10px] font-black text-white/30 uppercase tracking-widest px-3 mb-2">Main</h3>
             {navButton('overview', '📊', 'Overview')}
+            {navButton('wealth', '🏦', 'The Vault')}
             {navButton('sync', '🔄', 'Sync & Import')}
             {navButton('checklist', '⚖️', 'Checklist')}
             
@@ -95,6 +97,12 @@ function App() {
         <div className="p-12 max-w-6xl mx-auto w-full">
           {currentView === 'overview' && <OverviewWidget onNavigateToReviews={() => setCurrentView('reviews')} />}
           
+          {currentView === 'wealth' && (
+            <div className="h-full">
+              <WealthDashboardWidget />
+            </div>
+          )}
+
           {currentView === 'reviews' && (
             <div className="bg-zinc-900/50 p-8 rounded-lg border border-white/5 shadow-2xl">
               <LedgerReviewWidget />
