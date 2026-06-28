@@ -165,9 +165,9 @@ export default function VaultChecklist() {
         </div>
 
         <div className="overflow-x-auto custom-scrollbar pb-4">
-          <div className="min-w-[800px] bg-zinc-950/80 border border-white/10 rounded-xl overflow-hidden backdrop-blur-md shadow-2xl">
+          <div className="min-w-[1100px] bg-zinc-950/80 border border-white/10 rounded-xl overflow-hidden backdrop-blur-md shadow-2xl">
             {/* Grid Header */}
-            <div className="grid grid-cols-[1.5fr_repeat(12,1fr)] bg-black/60 border-b border-white/10 text-[10px] uppercase font-bold tracking-widest text-white/50 py-3">
+            <div className="grid grid-cols-[2.5fr_repeat(12,0.6fr)] bg-black/60 border-b border-white/10 text-[10px] uppercase font-bold tracking-widest text-white/50 py-3">
               <div className="pl-4">Institution</div>
               {months.map(m => (
                 <div key={m} className="text-center">{m}</div>
@@ -177,7 +177,7 @@ export default function VaultChecklist() {
             {/* Grid Body */}
             <div className="divide-y divide-white/5">
               {data.statements.map((inst, iIdx) => (
-                <div key={inst.institution} className="grid grid-cols-[1.5fr_repeat(12,1fr)] hover:bg-white/5 transition-colors items-center py-2">
+                <div key={inst.institution} className="grid grid-cols-[2.5fr_repeat(12,0.6fr)] hover:bg-white/5 transition-colors items-center py-2">
                   <div className="pl-4 text-xs font-bold text-white/80 truncate pr-2">
                     {inst.institution}
                   </div>

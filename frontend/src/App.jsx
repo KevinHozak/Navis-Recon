@@ -94,7 +94,7 @@ function App() {
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col h-screen overflow-y-auto custom-scrollbar">
-        <div className="p-12 max-w-6xl mx-auto w-full">
+        <div className="p-12 mx-auto w-full xl:max-w-7xl 2xl:max-w-full">
           {currentView === 'overview' && <OverviewWidget onNavigateToReviews={() => setCurrentView('reviews')} />}
           
           {currentView === 'wealth' && (
