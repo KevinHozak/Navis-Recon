@@ -70,7 +70,7 @@ const SyncWidget = () => {
   const handleCommit = async () => {
     setPhase('committing');
     const toCommit = matches.filter((_, i) => selectedMatches.has(i));
-    
+
     try {
       const response = await fetch(`${API_BASE}/api/ledger/sync/commit`, {
         method: 'POST',
@@ -78,14 +78,18 @@ const SyncWidget = () => {
         body: JSON.stringify(toCommit),
       });
       const result = await response.json();
-      if (result.status === 'success') {
+      if (response.ok && result && result.status === 'success') {
         setPhase('complete');
       } else {
-        alert('Commit failed: ' + result.stderr);
+        const message =
+          (typeof result === 'object' && result && (result.detail || (result.stderr && result.stderr.trim())))
+            || (typeof result === 'string' ? result : undefined)
+            || 'An unknown error occurred during commit.';
+        alert('Commit failed: ' + message);
         setPhase('review');
       }
     } catch (e) {
-      alert('Network error during commit.');
+      alert('Network error during commit: ' + (e?.message || e));
       setPhase('review');
     }
   };
