@@ -1,60 +1,44 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import CategorySelector from './CategorySelector';
-
-const API_BASE = 'http://localhost:8080';
+import { approveLedgerTransaction, getLedgerCategories, getPendingLedger } from '../services/apiClient';
 
 export default function LedgerReviewWidget() {
   const [pending, setPending] = useState([]);
   const [categories, setCategories] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    fetchPending();
-    fetchCategories();
-  }, []);
-
-  const fetchPending = async () => {
+  async function fetchPending() {
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/ledger/pending`);
-      if (res.ok) {
-        const data = await res.json();
-        setPending(data);
-      }
+      setPending(await getPendingLedger());
     } catch (e) {
       console.error("Failed to fetch pending ledger", e);
     } finally {
       setLoading(false);
     }
-  };
+  }
 
-  const fetchCategories = async () => {
+  async function fetchCategories() {
     try {
-      const res = await fetch(`${API_BASE}/api/ledger/categories`);
-      if (res.ok) {
-        const data = await res.json();
-        setCategories(data);
-      }
+      setCategories(await getLedgerCategories());
     } catch (e) {
       console.error("Failed to fetch ledger categories", e);
     }
-  };
+  }
+
+  useEffect(() => {
+    // Load the external ledger state when the review panel mounts.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    fetchPending();
+    fetchCategories();
+  }, []);
 
   const handleApprove = async (index, lineNum, category) => {
     try {
-      const res = await fetch(`${API_BASE}/api/ledger/approve`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ line_num: lineNum, category })
-      });
-      if (res.ok) {
-        // Remove from list
-        setPending(prev => prev.filter((_, i) => i !== index));
-      } else {
-        alert("Failed to approve transaction.");
-      }
+      await approveLedgerTransaction(lineNum, category);
+      setPending(prev => prev.filter((_, i) => i !== index));
     } catch (e) {
       alert("Error: " + e.message);
     }
