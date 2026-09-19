@@ -1,36 +1,36 @@
-import React, { useState, useEffect } from 'react'
+import { useState, useEffect } from 'react'
 import LedgerReviewWidget from './components/LedgerReviewWidget'
 import OverviewWidget from './components/OverviewWidget'
 import CategoryDetailWidget from './components/CategoryDetailWidget'
 import VaultChecklist from './components/VaultChecklist'
 import SyncWidget from './components/SyncWidget'
 import WealthDashboardWidget from './components/WealthDashboardWidget'
+import { ping, request } from './services/apiClient'
 import './index.css'
-
-const API_BASE = 'http://localhost:8080';
 
 function App() {
   const [currentView, setCurrentView] = useState('overview');
   const [pendingCount, setPendingCount] = useState(0);
+  const [desktopStatus, setDesktopStatus] = useState('checking');
+
+  async function fetchPendingCount() {
+    try {
+      const data = await request('/api/ledger/pending');
+      setPendingCount(data.length);
+    } catch (e) {
+      console.error(e);
+    }
+  }
 
   useEffect(() => {
+    ping()
+      .then(() => setDesktopStatus('online'))
+      .catch(() => setDesktopStatus('offline'))
     fetchPendingCount();
     // Refresh count every 10 seconds to keep sidebar accurate
     const interval = setInterval(fetchPendingCount, 10000);
     return () => clearInterval(interval);
   }, []);
-
-  const fetchPendingCount = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/api/ledger/pending`);
-      if (res.ok) {
-        const data = await res.json();
-        setPendingCount(data.length);
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  };
 
   const navButton = (viewId, icon, label) => {
     const isActive = currentView === viewId;
@@ -55,6 +55,7 @@ function App() {
           </div>
           <div>
             <h1 className="text-sm font-black uppercase tracking-widest italic leading-tight">Navis<br/>Recon</h1>
+            <span className="text-[9px] uppercase tracking-widest text-white/30">IPC {desktopStatus}</span>
           </div>
         </div>
         

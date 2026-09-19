@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Tauri build output and generated permission schemas
+src-tauri/target
+src-tauri/gen
+src-tauri/icons/*
+!src-tauri/icons/icon.ico
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
