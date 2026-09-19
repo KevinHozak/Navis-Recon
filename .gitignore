@@ -15,6 +15,11 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Local desktop build artifacts
+/Navis-Recon.exe
+/Navis-Recon-Setup.exe
+/Navis-Recon.lnk
+
 # IDE
 .idea/
 .vscode/

@@ -125,4 +125,6 @@ cd ..
 start.bat
 ```
 
+The build also publishes `Navis-Recon.exe`, `Navis-Recon-Setup.exe`, and `Navis-Recon.lnk` directly in the repository root for convenient launching.
+
 The custom compass-ledger application icon is authored in `frontend/src-tauri/icon-source.svg` and compiled into the Windows asset at `frontend/src-tauri/icons/icon.ico`. Retired FastAPI and dual-server launch artifacts are preserved under `docs/archive/`.
