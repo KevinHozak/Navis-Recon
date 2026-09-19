@@ -15,9 +15,9 @@ export default defineConfig({
         enabled: false
       },
       manifest: {
-        name: 'Family Ledger',
-        short_name: 'Ledger',
-        description: 'The primary financial hub for the Hozak family',
+        name: 'Navis-Recon',
+        short_name: 'Navis-Recon',
+        description: 'Financial reconnaissance and ledger reconciliation hub',
         theme_color: '#09090b',
         background_color: '#09090b',
         display: 'standalone',

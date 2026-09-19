@@ -54,7 +54,7 @@ function App() {
             🏛️
           </div>
           <div>
-            <h1 className="text-sm font-black uppercase tracking-widest italic leading-tight">Family<br/>Ledger</h1>
+            <h1 className="text-sm font-black uppercase tracking-widest italic leading-tight">Navis<br/>Recon</h1>
           </div>
         </div>
         

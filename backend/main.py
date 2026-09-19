@@ -9,7 +9,7 @@ import beancount.loader
 from beancount.core import realization
 from beancount.core import data
 
-app = FastAPI(title="Family Ledger API")
+app = FastAPI(title="Navis-Recon API")
 
 # Allow CORS for local Vite frontend
 app.add_middleware(

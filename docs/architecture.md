@@ -1,6 +1,6 @@
-# Architecture: Family Ledger
+# Architecture: Navis-Recon
 
-Family Ledger was spun out of the Navis ecosystem to serve as a focused, lightweight financial hub. This document explains the core technical flow.
+Navis-Recon was spun out of the Navis ecosystem to serve as a focused, lightweight financial hub. This document explains the core technical flow.
 
 ## The Data Source
 The ultimate source of truth is a plain text file written in Beancount syntax:
@@ -35,7 +35,7 @@ Located in `frontend/`, this is a React SPA running on port 5173.
 - **CategorySelector.jsx**: A custom-built dropdown input that fuzzy-searches the available categories fetched from the backend.
 
 ## Operational Mandates (Vault Protocol)
-Family Ledger adheres to the structural and operational mandates established in the original Vault Protocol:
+Navis-Recon adheres to the structural and operational mandates established in the original Vault Protocol:
 
 1. **Strict Chronology:** Statements must be archived using the format `[Institution] [YYYY-MM-DD].pdf`.
 2. **Directory Structure:** No financial PDFs are allowed in the root. Everything must be filed within the `G:\My Drive\Navis-Vault\Ledger\` root directory:
