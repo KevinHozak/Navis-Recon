@@ -1,31 +1,28 @@
-import React, { useState, useEffect } from 'react';
-import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { useState, useEffect } from 'react';
+import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
 import TransactionDrillDown from './TransactionDrillDown';
-
-const API_BASE = 'http://localhost:8080';
+import { getLedgerSummary } from '../services/apiClient';
 
 export default function CategoryDetailWidget({ categoryKey, title, icon, isLiability = false }) {
   const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    fetchSummary();
-  }, [categoryKey]);
-
-  const fetchSummary = async () => {
+  async function fetchSummary() {
     try {
       setLoading(true);
-      const res = await fetch(`${API_BASE}/api/ledger/summary`);
-      if (res.ok) {
-        const data = await res.json();
-        setSummary(data);
-      }
+      setSummary(await getLedgerSummary());
     } catch (e) {
       console.error("Failed to fetch summary", e);
     } finally {
       setLoading(false);
     }
-  };
+  }
+
+  useEffect(() => {
+    // Refresh the category view when its account family changes.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    fetchSummary();
+  }, [categoryKey]);
 
   if (loading) {
     return <div className="p-8 text-center text-accent uppercase font-mono animate-pulse">Loading {title}...</div>;
@@ -37,7 +34,7 @@ export default function CategoryDetailWidget({ categoryKey, title, icon, isLiabi
 
   const rawData = summary[categoryKey];
   const chartData = Object.entries(rawData)
-    .filter(([_, value]) => value !== 0)
+    .filter(([, value]) => value !== 0)
     .map(([name, value]) => ({
       name,
       value: Math.abs(value),

@@ -1,4 +1,5 @@
 mod checklist;
+mod ledger_parser;
 mod ledger_review;
 
 pub fn run() {
@@ -9,6 +10,9 @@ pub fn run() {
             ledger_review::get_pending_ledger,
             ledger_review::get_ledger_categories,
             ledger_review::approve_ledger_transaction,
+            ledger_parser::get_ledger_summary,
+            ledger_parser::get_ledger_history,
+            ledger_parser::get_ledger_transactions,
             ping
         ])
         .run(tauri::generate_context!())

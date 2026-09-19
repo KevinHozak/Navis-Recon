@@ -1,29 +1,26 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
-
-const API_BASE = 'http://localhost:8080';
+import { getLedgerSummary } from '../services/apiClient';
 
 export default function OverviewWidget({ onNavigateToReviews }) {
   const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    fetchSummary();
-  }, []);
-
-  const fetchSummary = async () => {
+  async function fetchSummary() {
     try {
-      const res = await fetch(`${API_BASE}/api/ledger/summary`);
-      if (res.ok) {
-        const data = await res.json();
-        setSummary(data);
-      }
+      setSummary(await getLedgerSummary());
     } catch (e) {
       console.error("Failed to fetch summary", e);
     } finally {
       setLoading(false);
     }
-  };
+  }
+
+  useEffect(() => {
+    // Load external ledger state when the overview mounts.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    fetchSummary();
+  }, []);
 
   if (loading) {
     return <div className="p-8 text-center text-accent uppercase font-mono animate-pulse">Calculating Net Worth...</div>;

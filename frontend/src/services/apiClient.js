@@ -80,4 +80,25 @@ export function approveLedgerTransaction(lineNum, category) {
   })
 }
 
+export function getLedgerSummary() {
+  return request('/api/ledger/summary', {
+    ipcCommand: 'get_ledger_summary',
+    ipcArgs: {},
+  })
+}
+
+export function getLedgerHistory() {
+  return request('/api/ledger/history', {
+    ipcCommand: 'get_ledger_history',
+    ipcArgs: {},
+  })
+}
+
+export function getLedgerTransactions(prefix) {
+  return request(`/api/ledger/transactions?prefix=${encodeURIComponent(prefix)}`, {
+    ipcCommand: 'get_ledger_transactions',
+    ipcArgs: { prefix },
+  })
+}
+
 export { API_BASE }
