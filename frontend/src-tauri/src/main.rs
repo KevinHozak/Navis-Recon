@@ -1,11 +1,3 @@
-#[tauri::command]
-fn ping() -> &'static str {
-    "pong"
-}
-
 fn main() {
-    tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![ping])
-        .run(tauri::generate_context!())
-        .expect("error while running Navis-Recon");
+    navis_recon::run();
 }
