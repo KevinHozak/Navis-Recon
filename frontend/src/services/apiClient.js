@@ -56,4 +56,28 @@ export function saveVaultChecklist(payload) {
   })
 }
 
+export function getPendingLedger() {
+  return request('/api/ledger/pending', {
+    ipcCommand: 'get_pending_ledger',
+    ipcArgs: {},
+  })
+}
+
+export function getLedgerCategories() {
+  return request('/api/ledger/categories', {
+    ipcCommand: 'get_ledger_categories',
+    ipcArgs: {},
+  })
+}
+
+export function approveLedgerTransaction(lineNum, category) {
+  return request('/api/ledger/approve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ line_num: lineNum, category }),
+    ipcCommand: 'approve_ledger_transaction',
+    ipcArgs: { lineNum, category },
+  })
+}
+
 export { API_BASE }
