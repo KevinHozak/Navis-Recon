@@ -1,57 +1,51 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
+import { getVaultChecklist, saveVaultChecklist } from '../services/apiClient';
 
 export default function VaultChecklist() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
-  const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080';
-
-  useEffect(() => {
-    fetchChecklist();
-  }, []);
-
-  const fetchChecklist = async () => {
+  async function fetchChecklist() {
     try {
-      const res = await fetch(`${API_BASE}/api/vault/checklist`);
-      if (res.ok) {
-        const json = await res.json();
-        if (!json.error) {
-          setData(json);
-        }
+      const json = await getVaultChecklist();
+      if (!json.error) {
+        setData(json);
       }
     } catch (err) {
       console.error("DEBUG: Failed to fetch checklist:", err);
     } finally {
       setLoading(false);
     }
-  };
+  }
 
-  const saveChecklist = async (updatedData) => {
+  async function saveChecklist(updatedData) {
     setSaving(true);
     try {
-      await fetch(`${API_BASE}/api/vault/checklist`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatedData)
-      });
+      await saveVaultChecklist(updatedData);
     } catch (err) {
       console.error("DEBUG: Failed to save checklist:", err);
     } finally {
       setSaving(false);
     }
-  };
+  }
+
+  useEffect(() => {
+    // Loading external checklist state is the purpose of this effect.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    fetchChecklist();
+  }, []);
 
   const handleStatementToggle = (instIndex, monthIndex) => {
-    const newData = { ...data };
+    const newData = structuredClone(data);
     newData.statements[instIndex].months[monthIndex] = !newData.statements[instIndex].months[monthIndex];
     setData(newData);
     saveChecklist(newData);
   };
 
   const handleTaskToggle = (weekIndex, taskIndex) => {
-    const newData = { ...data };
+    const newData = structuredClone(data);
     newData.triage[weekIndex].tasks[taskIndex].completed = !newData.triage[weekIndex].tasks[taskIndex].completed;
     setData(newData);
     saveChecklist(newData);
@@ -77,6 +71,7 @@ export default function VaultChecklist() {
         <span className="text-5xl drop-shadow-[0_0_15px_rgba(0,212,255,0.5)]">⚖️</span>
         <h2 className="text-3xl font-black text-white tracking-widest uppercase italic">Master Checklist</h2>
         <p className="text-sm font-mono text-cyan-400/80 uppercase tracking-widest">Sovereign Ledger Operations</p>
+        {saving && <span className="text-[10px] font-mono text-white/40 uppercase tracking-widest">Saving...</span>}
       </div>
 
       {/* Monthly Triage */}

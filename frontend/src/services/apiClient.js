@@ -39,4 +39,21 @@ export function ping() {
   })
 }
 
+export function getVaultChecklist() {
+  return request('/api/vault/checklist', {
+    ipcCommand: 'get_vault_checklist',
+    ipcArgs: {},
+  })
+}
+
+export function saveVaultChecklist(payload) {
+  return request('/api/vault/checklist', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    ipcCommand: 'save_vault_checklist',
+    ipcArgs: { payload },
+  })
+}
+
 export { API_BASE }
