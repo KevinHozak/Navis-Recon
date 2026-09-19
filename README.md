@@ -4,8 +4,8 @@
 
 [![Project Board](https://img.shields.io/badge/GitHub-Project_%236-00d4ff?logo=github&logoColor=white)](https://github.com/users/KevinHozak/projects/6)
 [![Frontend](https://img.shields.io/badge/Frontend-Vite_8_+_React_19-646CFF?logo=vite&logoColor=white)](frontend/)
-[![Backend](https://img.shields.io/badge/Backend-FastAPI-009688?logo=fastapi&logoColor=white)](backend/)
-[![Ledger](https://img.shields.io/badge/Engine-Beancount_AST-red)](backend/main.py)
+[![Desktop](https://img.shields.io/badge/Desktop-Tauri_v2-24C8DB?logo=tauri&logoColor=white)](frontend/src-tauri/)
+[![Ledger](https://img.shields.io/badge/Engine-Native_Rust-red)](frontend/src-tauri/src/)
 [![Styling](https://img.shields.io/badge/Styling-Tailwind_CSS_v4-38BDF8?logo=tailwindcss&logoColor=white)](frontend/src/index.css)
 
 ---
@@ -23,7 +23,7 @@ Unlike bloated third-party SaaS budgeting tools or complex gaming-themed lore po
 * **⚡ High-Speed Triage & Approval:** Instantly scans `Sovereign.beancount` for pending (`!`) transactions, surfaces AI/rule-guessed categories, and executes atomic line-level approvals (`*`) back to disk.
 * **🏦 The Vault (Wealth Dashboard):** Parses the Beancount ledger into an Abstract Syntax Tree (AST) using `beancount.loader` to generate real-time net worth visualizations, balance curves, and category drill-downs via dynamic Recharts.
 * **📋 Sovereign Statement Checklist:** Audits monthly statements against a structured registry to guarantee zero unverified bank activity.
-* **🔄 Live Sync Pipeline:** Automated financial harvesting and statement sync engine with real-time Server-Sent Events (SSE) streaming progress to the UI.
+* **🔄 Live Sync Pipeline:** Automated financial harvesting and statement sync engine with real-time Tauri event streaming progress to the UI.
 * **📱 Progressive Web App (PWA):** Installable, responsive web application tuned for desktop command and mobile review with offline shell caching.
 
 ---
@@ -111,3 +111,18 @@ Development tasks and phased migration epics are tracked on the official **[Navi
 - [ ] **Tauri-P4: Beancount Parser & Telemetry Engine** ([#4](https://github.com/KevinHozak/Navis-Recon/issues/4)) — Rust AST & balance realization. *(Depends on: #1, #3 | Blocks: #6)*
 - [ ] **Tauri-P5: Financial Harvester & Event Streaming** ([#5](https://github.com/KevinHozak/Navis-Recon/issues/5)) — Tauri event streaming for harvester. *(Depends on: #1 | Blocks: #6)*
 - [ ] **Tauri-P6: Standalone Executable Packaging & Sunset** ([#6](https://github.com/KevinHozak/Navis-Recon/issues/6)) — Bundle `Navis-Recon.exe` & retire FastAPI. *(Depends on: #1, #2, #3, #4, #5)*
+
+## Standalone Desktop Architecture
+
+Navis-Recon is packaged as a Tauri v2 Windows desktop application. The native Rust layer owns ledger parsing, checklist and review persistence, and the financial harvester bridge. The packaged executable does not require FastAPI, Uvicorn, or a frontend server on ports 8080 and 5173.
+
+Build and launch the release application with:
+
+```cmd
+cd frontend
+npm run desktop:build
+cd ..
+start.bat
+```
+
+The custom compass-ledger application icon is authored in `frontend/src-tauri/icon-source.svg` and compiled into the Windows asset at `frontend/src-tauri/icons/icon.ico`. Retired FastAPI and dual-server launch artifacts are preserved under `docs/archive/`.
