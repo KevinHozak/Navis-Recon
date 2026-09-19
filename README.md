@@ -105,9 +105,9 @@ npm run dev
 Development tasks and phased migration epics are tracked on the official **[Navis-Recon GitHub Project Board (#6)](https://github.com/users/KevinHozak/projects/6)**.
 
 ### 🦀 [Epic: Tauri Desktop Migration (#7)](https://github.com/KevinHozak/Navis-Recon/issues/7)
-- [ ] **Tauri-P1: Shell & IPC Scaffold** ([#1](https://github.com/KevinHozak/Navis-Recon/issues/1)) — Initialize `src-tauri` shell, window styling, and React IPC abstraction.
-- [ ] **Tauri-P2: Checklist & Triage Engine** ([#2](https://github.com/KevinHozak/Navis-Recon/issues/2)) — Port `checklist.json` operations directly to Rust.
-- [ ] **Tauri-P3: Ledger Review & Approvals** ([#3](https://github.com/KevinHozak/Navis-Recon/issues/3)) — Port pending ledger scans and targeted approvals to Rust.
-- [ ] **Tauri-P4: Beancount Parser & Telemetry Engine** ([#4](https://github.com/KevinHozak/Navis-Recon/issues/4)) — Native Rust Beancount AST and balance realization for wealth metrics.
-- [ ] **Tauri-P5: Financial Harvester & Event Streaming** ([#5](https://github.com/KevinHozak/Navis-Recon/issues/5)) — Bridge Python statement harvester via Tauri event channels.
-- [ ] **Tauri-P6: Standalone Executable Packaging & Sunset** ([#6](https://github.com/KevinHozak/Navis-Recon/issues/6)) — Bundle `Navis-Recon.exe` and deprecate the FastAPI background server.
+- [ ] **Tauri-P1: Shell & IPC Scaffold** ([#1](https://github.com/KevinHozak/Navis-Recon/issues/1)) — Foundational shell & IPC bridge. *(Blocks: #2, #3, #4, #5, #6)*
+- [ ] **Tauri-P2: Checklist & Triage Engine** ([#2](https://github.com/KevinHozak/Navis-Recon/issues/2)) — Direct Rust `checklist.json` I/O. *(Depends on: #1 | Blocks: #6)*
+- [ ] **Tauri-P3: Ledger Review & Approvals** ([#3](https://github.com/KevinHozak/Navis-Recon/issues/3)) — Rust pending line scans & approvals. *(Depends on: #1 | Blocks: #4, #6)*
+- [ ] **Tauri-P4: Beancount Parser & Telemetry Engine** ([#4](https://github.com/KevinHozak/Navis-Recon/issues/4)) — Rust AST & balance realization. *(Depends on: #1, #3 | Blocks: #6)*
+- [ ] **Tauri-P5: Financial Harvester & Event Streaming** ([#5](https://github.com/KevinHozak/Navis-Recon/issues/5)) — Tauri event streaming for harvester. *(Depends on: #1 | Blocks: #6)*
+- [ ] **Tauri-P6: Standalone Executable Packaging & Sunset** ([#6](https://github.com/KevinHozak/Navis-Recon/issues/6)) — Bundle `Navis-Recon.exe` & retire FastAPI. *(Depends on: #1, #2, #3, #4, #5)*
