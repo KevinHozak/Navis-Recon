@@ -1,6 +1,7 @@
 mod checklist;
 mod ledger_parser;
 mod ledger_review;
+mod sync;
 
 pub fn run() {
     tauri::Builder::default()
@@ -13,6 +14,8 @@ pub fn run() {
             ledger_parser::get_ledger_summary,
             ledger_parser::get_ledger_history,
             ledger_parser::get_ledger_transactions,
+            sync::start_ledger_sync,
+            sync::commit_ledger_sync,
             ping
         ])
         .run(tauri::generate_context!())

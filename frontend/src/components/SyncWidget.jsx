@@ -1,6 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
-
-const API_BASE = 'http://localhost:8080';
+import { useState, useEffect, useRef } from 'react';
+import { commitLedgerSync, isDesktopRuntime, listenForSyncEvents, startLedgerSync } from '../services/apiClient';
 
 const SyncWidget = () => {
   const [phase, setPhase] = useState('idle'); // idle, analyzing, review, committing, complete
@@ -18,6 +17,31 @@ const SyncWidget = () => {
     }
   }, [logs, phase]);
 
+  useEffect(() => {
+    let cleanup;
+    listenForSyncEvents({
+      log: (data) => setLogs((prev) => [...prev, data.message || '']),
+      match: (data) => {
+        setMatches((prev) => {
+          const next = [...prev, data];
+          setSelectedMatches(new Set(next.map((_, i) => i)));
+          return next;
+        });
+        setLogs((prev) => [...prev, `Matched: ${data.filename} -> ${data.new_name}`]);
+      },
+      unmatched: (data) => {
+        setUnmatched((prev) => [...prev, data]);
+        setLogs((prev) => [...prev, `Unmatched: ${data.filename} (${data.message})`]);
+      },
+      error: (data) => {
+        setErrors((prev) => [...prev, data]);
+        setLogs((prev) => [...prev, `Error: ${data.filename || ''} - ${data.message}`]);
+      },
+      done: (data) => setPhase(data.status === 'success' ? 'review' : 'review'),
+    }).then((unlisten) => { cleanup = unlisten; });
+    return () => { cleanup?.(); };
+  }, []);
+
   const handleStartAnalyze = () => {
     setPhase('analyzing');
     setLogs([]);
@@ -26,45 +50,16 @@ const SyncWidget = () => {
     setErrors([]);
     setSelectedMatches(new Set());
 
-    const eventSource = new EventSource(`${API_BASE}/api/ledger/sync/stream`);
-
-    eventSource.onmessage = (event) => {
-      const dataStr = event.data;
-      if (dataStr === '[DONE]') {
-        eventSource.close();
-        setPhase('review');
-      } else {
-        try {
-          const data = JSON.parse(dataStr);
-          if (data.type === 'log') {
-            setLogs((prev) => [...prev, data.message]);
-          } else if (data.type === 'match') {
-            setMatches((prev) => {
-              const newMatches = [...prev, data];
-              setSelectedMatches(new Set(newMatches.map((_, i) => i))); // select all by default
-              return newMatches;
-            });
-            setLogs((prev) => [...prev, `Matched: ${data.filename} -> ${data.new_name}`]);
-          } else if (data.type === 'unmatched') {
-            setUnmatched((prev) => [...prev, data]);
-            setLogs((prev) => [...prev, `Unmatched: ${data.filename} (${data.message})`]);
-          } else if (data.type === 'error') {
-            setErrors((prev) => [...prev, data]);
-            setLogs((prev) => [...prev, `Error: ${data.filename || ''} - ${data.message}`]);
-          }
-        } catch (e) {
-          // Fallback if not JSON
-          setLogs((prev) => [...prev, dataStr]);
-        }
-      }
-    };
-
-    eventSource.onerror = (err) => {
-      console.error('EventSource failed:', err);
-      eventSource.close();
+    if (!isDesktopRuntime()) {
       setPhase('review');
-      setLogs((prev) => [...prev, 'Error: Connection lost or failed to start sync.']);
-    };
+      setLogs((prev) => [...prev, 'Error: Ledger sync requires the Tauri desktop shell.']);
+      return;
+    }
+    startLedgerSync().catch((error) => {
+      setPhase('review');
+      setErrors((prev) => [...prev, { message: error.message }]);
+      setLogs((prev) => [...prev, `Error: ${error.message}`]);
+    });
   };
 
   const handleCommit = async () => {
@@ -72,13 +67,8 @@ const SyncWidget = () => {
     const toCommit = matches.filter((_, i) => selectedMatches.has(i));
 
     try {
-      const response = await fetch(`${API_BASE}/api/ledger/sync/commit`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(toCommit),
-      });
-      const result = await response.json();
-      if (response.ok && result && result.status === 'success') {
+      const result = await commitLedgerSync(toCommit);
+      if (result && result.status === 'success') {
         setPhase('complete');
       } else {
         const message =
