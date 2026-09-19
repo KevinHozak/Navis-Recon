@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080'
 
@@ -99,6 +100,34 @@ export function getLedgerTransactions(prefix) {
     ipcCommand: 'get_ledger_transactions',
     ipcArgs: { prefix },
   })
+}
+
+export function startLedgerSync() {
+  if (!isDesktopRuntime()) {
+    return Promise.reject(new Error('Ledger sync requires the Tauri desktop shell.'))
+  }
+  return invoke('start_ledger_sync')
+}
+
+export function commitLedgerSync(payload) {
+  if (isDesktopRuntime()) {
+    return invoke('commit_ledger_sync', { payload })
+  }
+  return request('/api/ledger/sync/commit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function listenForSyncEvents(handlers) {
+  if (!isDesktopRuntime()) return () => {}
+  const unlisteners = await Promise.all(
+    Object.entries(handlers).map(([eventName, handler]) =>
+      listen(`sync:${eventName}`, (event) => handler(event.payload))
+    )
+  )
+  return () => Promise.all(unlisteners.map((unlisten) => unlisten()))
 }
 
 export { API_BASE }
