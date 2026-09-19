@@ -1,7 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
-
-const API_BASE = 'http://localhost:8080';
+import { getLedgerHistory } from '../services/apiClient';
 
 const formatYAxis = (tickItem) => {
   if (tickItem >= 1000000) return `$${(tickItem / 1000000).toFixed(1)}M`;
@@ -37,26 +36,22 @@ export default function WealthDashboardWidget() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  useEffect(() => {
-    fetchHistory();
-  }, []);
-
-  const fetchHistory = async () => {
+  async function fetchHistory() {
     try {
-      const res = await fetch(`${API_BASE}/api/ledger/history`);
-      if (res.ok) {
-        const data = await res.json();
-        setHistory(data);
-      } else {
-        setError("Failed to fetch dashboard history");
-      }
+      setHistory(await getLedgerHistory());
     } catch (e) {
       console.error(e);
       setError("Network error fetching dashboard history");
     } finally {
       setLoading(false);
     }
-  };
+  }
+
+  useEffect(() => {
+    // Load external ledger history when the dashboard mounts.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    fetchHistory();
+  }, []);
 
   if (loading) {
     return <div className="p-8 text-center text-accent uppercase font-mono animate-pulse">Calculating Lifetime Wealth Metrics...</div>;

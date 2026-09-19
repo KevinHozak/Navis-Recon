@@ -1,6 +1,5 @@
-import React, { useState, useEffect, useMemo } from 'react';
-
-const API_BASE = 'http://localhost:8080';
+import { Fragment, useState, useEffect, useMemo } from 'react';
+import { getLedgerTransactions } from '../services/apiClient';
 
 const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
@@ -9,25 +8,25 @@ export default function TransactionDrillDown({ prefix, isLiability }) {
   const [loading, setLoading] = useState(true);
   const [path, setPath] = useState([]); // e.g. [] -> ['2026'] -> ['2026', 'Q2'] -> ['2026', 'Q2', 'May']
 
-  useEffect(() => {
-    fetchTransactions();
-    setPath([]);
-  }, [prefix]);
-
-  const fetchTransactions = async () => {
+  async function fetchTransactions() {
     try {
       setLoading(true);
-      const res = await fetch(`${API_BASE}/api/ledger/transactions?prefix=${prefix}`);
-      if (res.ok) {
-        const data = await res.json();
-        setTransactions(data);
-      }
+      setTransactions(await getLedgerTransactions(prefix));
     } catch (e) {
       console.error(e);
     } finally {
       setLoading(false);
     }
-  };
+  }
+
+  useEffect(() => {
+    // Refresh the external transaction stream when the account prefix changes.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    fetchTransactions();
+    setPath([]);
+    // The loader is intentionally scoped to the current prefix.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefix]);
 
   // Grouping Logic
   const getQuarter = (monthIndex) => `Q${Math.floor(monthIndex / 3) + 1}`;
@@ -94,8 +93,6 @@ export default function TransactionDrillDown({ prefix, isLiability }) {
 
   const accentColor = isLiability ? "text-red-400" : "text-accent";
   const hoverBg = isLiability ? "hover:bg-red-500/10" : "hover:bg-accent/10";
-  const borderColor = isLiability ? "border-red-500/20" : "border-accent/20";
-
   return (
     <div className={`mt-8 border border-white/5 bg-zinc-900/50 rounded-lg p-6 shadow-inner`}>
       {/* Breadcrumb Header */}
@@ -107,7 +104,7 @@ export default function TransactionDrillDown({ prefix, isLiability }) {
           All Time
         </button>
         {path.map((segment, idx) => (
-          <React.Fragment key={idx}>
+          <Fragment key={idx}>
             <span>/</span>
             <button 
               onClick={() => handleBreadcrumbClick(idx + 1)}
@@ -115,7 +112,7 @@ export default function TransactionDrillDown({ prefix, isLiability }) {
             >
               {segment}
             </button>
-          </React.Fragment>
+          </Fragment>
         ))}
       </div>
 
