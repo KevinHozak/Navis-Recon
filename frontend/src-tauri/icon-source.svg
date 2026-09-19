@@ -1,4 +1,20 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="96" fill="#09090b"/>
-  <path d="M128 368V144h64v224h-64Zm96 0V144h64v224h-64Zm96 0V144h64v224h-64ZM96 400h320v32H96v-32Zm32-288 128-64 128 64v32H128v-32Z" fill="#00d4ff"/>
+  <defs>
+    <linearGradient id="field" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#111827"/>
+      <stop offset="1" stop-color="#030712"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#67e8f9"/>
+      <stop offset="1" stop-color="#00d4ff"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#field)" stroke="#00d4ff" stroke-width="12"/>
+  <circle cx="256" cy="256" r="164" fill="none" stroke="#164e63" stroke-width="8"/>
+  <circle cx="256" cy="256" r="130" fill="#09090b" stroke="#155e75" stroke-width="4"/>
+  <path d="M256 104v28M256 380v28M104 256h28M380 256h28" stroke="#67e8f9" stroke-width="10" stroke-linecap="round"/>
+  <path d="m256 142 45 114-45 114-45-114 45-114Z" fill="url(#cyan)"/>
+  <path d="m256 142 45 114h-45V142Z" fill="#e0f2fe" opacity=".8"/>
+  <circle cx="256" cy="256" r="18" fill="#09090b" stroke="#fbbf24" stroke-width="8"/>
+  <path d="M154 194h-24M382 194h-24M154 318h-24M382 318h-24" stroke="#fbbf24" stroke-width="6" stroke-linecap="round" opacity=".9"/>
 </svg>

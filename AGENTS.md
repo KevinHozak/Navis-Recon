@@ -4,7 +4,7 @@
 > Read this for project startup, architecture mapping, and system-wide directives when pair-programming on Navis-Recon.
 
 ## 🏛️ Project Overview
-**Navis-Recon** is a standalone web application designed as the primary financial hub for the Hozak family. It serves as a visual frontend and triage interface for the `Sovereign.beancount` master ledger. 
+**Navis-Recon** is a standalone Tauri desktop application designed as the primary financial hub for the Hozak family. It serves as a visual frontend and triage interface for the `Sovereign.beancount` master ledger.
 
 Unlike Navis-Web, which is heavily themed around sci-fi RPG lore, Navis-Recon is a clean, hyper-focused financial dashboard that prioritizes data precision, net worth tracking, and high-speed ledger review.
 
@@ -12,7 +12,7 @@ Unlike Navis-Web, which is heavily themed around sci-fi RPG lore, Navis-Recon is
 
 ## 🗂️ Workspace Architecture
 
-The workspace is intentionally split into a lightweight frontend and a dedicated backend:
+The workspace contains a React frontend and a native Rust desktop backend:
 
 1. **`frontend/` (Vite + React)**
    - Runs on `http://localhost:5173`.
@@ -55,3 +55,7 @@ Navis-Recon maintains a premium aesthetic. Any modifications must adhere to thes
 
 1. **Beancount Integrity:** Never use raw string manipulation to change balances. The `beancount.loader` engine is strictly used for *reading* the ledger. When modifying lines for approvals, the backend performs highly specific targeted string replacements (e.g., swapping `!` for `*`) to preserve formatting and alignment.
 2. **Decoupled from Navis-Web:** DO NOT attempt to route traffic, share state, or link back to the Navis-Web application. Navis-Recon is completely standalone.
+
+## Standalone Desktop Packaging
+
+The packaged application is a Tauri v2 Windows executable. Rust IPC owns ledger parsing, checklist and review persistence, and the harvester bridge. Use `start.bat` and `stop.bat` for desktop startup and shutdown; the archived FastAPI/server-era scripts under `docs/archive/` are not part of the runtime. The release build is `cd frontend && npm run desktop:build`, and it must not require Uvicorn or ports 8080/5173.
