@@ -60,6 +60,34 @@ The app should display a useful summary without attempting to become a loan-serv
 
 Insurance data is especially sensitive. The application should minimize stored content and make access controls, backups, and export behavior explicit before this area is implemented.
 
+### Subscriptions and general payment tracking
+
+- Streaming, software, cloud-storage, memberships, utilities, and other recurring services
+- Payee, payment method, amount, billing frequency, next due date, renewal date, and cancellation instructions
+- Trial periods, introductory pricing, price increases, annual renewals, and cancellation windows
+- One-time bills and obligations such as medical invoices, registrations, taxes, repairs, and contractor deposits
+- Payment status such as planned, due, paid, overdue, disputed, or canceled
+- Optional links to matching transactions, statements, receipts, or ledger accounts
+- A review view for unused services, duplicate charges, upcoming large payments, and subscriptions that changed price
+
+This feature should help answer “what will need attention soon?” without pretending to know whether a payment succeeded unless that fact comes from a verified source. It could support manual entry first, followed later by carefully scoped statement or bank integrations if the security and consent model supports them.
+
+### PDF statement library
+
+Navis-Recon could provide a dedicated way to index and view household PDF statements without making the application the authoritative storage system for every document.
+
+- Browse statements by account, institution, statement type, and reporting period
+- Capture statement date, coverage period, account, source, file path, and processing status
+- Open PDFs in an embedded viewer or the system's default viewer
+- Search indexed filenames and extracted text where local text extraction is reliable
+- Mark statements as reviewed, reconciled, archived, or needing attention
+- Link a statement to ledger accounts, reconciliation periods, payments, claims, or maintenance records
+- Detect likely duplicates and highlight gaps in an expected monthly or annual sequence
+- Preserve the original PDF unchanged while storing any annotations or review metadata separately
+- Support readable exports of the statement index without exposing document contents unnecessarily
+
+The first version should work from user-selected folders or existing vault locations and should not silently move, rename, upload, or modify original PDFs. Any OCR or text extraction should be treated as an aid for search, not as a replacement for visually checking the source document.
+
 ### Medical and care information
 
 - Insurance-card metadata and coverage dates
@@ -77,6 +105,7 @@ The central object could be a `Record` or `HouseholdItem` with:
 - Person, household, vehicle, property, or asset association
 - Status such as active, expired, archived, or needs review
 - Important dates and recurrence rules
+- Amount, currency, payment frequency, due date, and payment status where the record represents a financial obligation
 - A protected-file reference or external location
 - Optional notes and contacts
 - Optional links to one or more ledger transactions or accounts
@@ -92,7 +121,8 @@ Events such as a service visit, renewal, payment, repair, claim, or document rep
 4. **Reminders must be explainable.** Every reminder should show the date, source, recurrence rule, and reason it was generated.
 5. **Safe handling of uncertainty.** Incomplete, estimated, or user-entered information should be labeled rather than presented as verified fact.
 6. **Portable data.** Records should be exportable in a readable format, with attachments and sensitive fields handled deliberately.
-7. **Small, composable modules.** Identity documents, vehicles, homes, insurance, and medical administration should be separable modules so the core dashboard does not become overwhelming.
+7. **Original documents are immutable.** PDFs and other source records should remain unchanged; derived indexes, extracted text, and review annotations should be disposable and rebuildable.
+8. **Small, composable modules.** Identity documents, statements, vehicles, homes, insurance, and medical administration should be separable modules so the core dashboard does not become overwhelming.
 
 ## Possible delivery path
 
@@ -102,7 +132,7 @@ Add a lightweight records view for names, categories, owners, statuses, expirati
 
 ### Phase 2: Recurring obligations
 
-Add reminder rules, recurring maintenance intervals, renewal tasks, and a review history. Make generated reminders visible and dismissible without silently deleting the underlying record.
+Add reminder rules, recurring maintenance intervals, subscription and bill schedules, renewal tasks, payment statuses, and a review history. Make generated reminders visible and dismissible without silently deleting the underlying record.
 
 ### Phase 3: Vehicle and home modules
 
@@ -111,6 +141,14 @@ Add structured maintenance history, mileage or time-based service schedules, war
 ### Phase 4: Insurance and property obligations
 
 Add policy, mortgage, property tax, escrow, and coverage metadata with conservative summaries and explicit source references.
+
+### Phase 4b: Payment and subscription review
+
+Add a dedicated view for recurring and upcoming payments, with optional ledger links, renewal-risk indicators, cancellation notes, and month-to-month or year-to-year cost summaries. Keep imported payment data read-only until there is a clear reconciliation workflow.
+
+### Phase 4c: Statement library and reconciliation workspace
+
+Add a local PDF index with folder selection, metadata, viewer links, review status, statement-period filtering, duplicate detection, and optional links to ledger reconciliation work. Treat extracted text as derived data that can be regenerated, and never overwrite the source PDFs.
 
 ### Phase 5: Protected document workflow
 
@@ -124,6 +162,11 @@ Only after the security model is established, consider encrypted document refere
 - Which household members can view or edit medical, insurance, and identity information?
 - How should reminders behave when a date is approximate or a source document has not been verified?
 - How can the UI keep everyday ledger review fast when additional modules exist?
+- Should payment records be manually maintained, imported from statements, or both?
+- How should the app distinguish an expected recurring payment from a confirmed completed payment?
+- Should PDF text extraction be local-only, and which formats or OCR languages need to be supported?
+- How should the app identify statement gaps without assuming that every account produces a monthly statement?
+- Should the viewer be embedded in the app, delegated to the operating system, or support both options?
 - Which data should be retained in Navis-Recon versus a document system, password manager, calendar, or specialist provider?
 
 ## Non-goals
@@ -132,6 +175,7 @@ Only after the security model is established, consider encrypted document refere
 - Acting as a password manager
 - Providing medical advice or a complete electronic health-record system
 - Becoming an authoritative mortgage, insurance, tax, or vehicle-maintenance provider
+- Replacing a bank's bill-pay, autopay, or payment-processing system
 - Uploading sensitive household records to a third-party service without explicit user choice
 
 The strongest version of this direction would make Navis-Recon a trusted household readiness layer: a clear place to see what matters, what is due, where the authoritative record lives, and what action is needed next.
