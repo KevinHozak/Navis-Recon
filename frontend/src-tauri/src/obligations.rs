@@ -1,10 +1,15 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
 
 use crate::ledger_parser::{parse_ledger, read_ledger, Transaction};
 
+pub const SUBSCRIPTIONS_PATH: &str = r"G:\My Drive\Navis-Vault\Ledger\subscriptions.json";
+
 /// Cadence classifications for recurring obligations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecurrenceCadence {
     Weekly,
@@ -41,19 +46,90 @@ impl RecurrenceCadence {
     }
 }
 
-/// A detected recurring obligation extracted from the ledger.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// User-configurable metadata for a subscription / obligation in the registry.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SubscriptionMetadata {
+    pub key: String,
+    pub payee: String,
+    pub account: String,
+    #[serde(default)]
+    pub billing_method: Option<String>,
+    #[serde(default)]
+    pub cancellation_url: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub is_trial: bool,
+    #[serde(default)]
+    pub trial_end_date: Option<String>,
+    #[serde(default)]
+    pub alert_lead_days: Option<u32>,
+    #[serde(default)]
+    pub custom_label: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Top-level payload stored in `subscriptions.json`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SubscriptionRegistryPayload {
+    #[serde(default)]
+    pub subscriptions: Vec<SubscriptionMetadata>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Price delta metrics comparing the most recent charge against the rolling median baseline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PriceDelta {
+    pub latest_amount: f64,
+    pub median_amount: f64,
+    pub dollar_delta: f64,
+    pub percentage_delta: f64,
+    pub is_increase: bool,
+}
+
+/// High-priority alerts for subscriptions (e.g. renewals due soon, expiring trials, price hikes).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RenewalAlertKind {
+    TrialExpiring,
+    AnnualRenewalDue,
+    RenewalDue,
+    PriceHike,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RenewalAlert {
+    pub kind: RenewalAlertKind,
+    pub message: String,
+    pub days_until: Option<i32>,
+}
+
+/// An enriched recurring obligation combining ledger telemetry, price-hike analysis,
+/// renewal alerts, and user-defined registry annotations.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecurringObligation {
+    pub key: String,
     pub payee: String,
     pub account: String,
     pub cadence: RecurrenceCadence,
+    pub latest_amount: f64,
     pub median_amount: f64,
     pub mean_amount: f64,
+    pub price_delta: Option<PriceDelta>,
+    pub alerts: Vec<RenewalAlert>,
     pub median_interval_days: i32,
     pub trailing_12m_count: usize,
     pub total_count: usize,
     pub last_date: String,
     pub next_projected_date: String,
+    pub metadata: Option<SubscriptionMetadata>,
+}
+
+/// Standard canonical key generator for an obligation: `"<payee>::<account>"`.
+pub fn obligation_key(payee: &str, account: &str) -> String {
+    format!("{}::{}", payee.trim(), account.trim())
 }
 
 /// Parse YYYY-MM-DD into (year, month, day).
@@ -131,6 +207,16 @@ pub fn add_days(date_str: &str, days: i32) -> Option<String> {
     Some(format!("{:04}-{:02}-{:02}", ny, nm, nd))
 }
 
+/// Returns the current date in YYYY-MM-DD format (UTC).
+pub fn current_date_utc() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let days = (now.as_secs() / 86400) as i32;
+    let (y, m, d) = from_days(days);
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
 /// Adds an offset of calendar months to a date string formatted as YYYY-MM-DD,
 /// clamping days to the end of month if the target month has fewer days.
 pub fn add_months(date_str: &str, months: i32) -> Option<String> {
@@ -147,12 +233,228 @@ fn round2(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
 }
 
+fn read_utf8_sig(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|error| format!("failed to read file: {error}"))?;
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
+    String::from_utf8(bytes.to_vec()).map_err(|error| format!("file is not valid UTF-8: {error}"))
+}
+
+#[cfg(windows)]
+fn replace_file(temp_path: &Path, path: &Path) -> Result<(), String> {
+    use std::iter::once;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source = temp_path
+        .as_os_str()
+        .encode_wide()
+        .chain(once(0))
+        .collect::<Vec<_>>();
+    let destination = path
+        .as_os_str()
+        .encode_wide()
+        .chain(once(0))
+        .collect::<Vec<_>>();
+
+    let replaced = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+
+    if replaced == 0 {
+        return Err(format!(
+            "failed to replace file atomically: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_file(temp_path: &Path, path: &Path) -> Result<(), String> {
+    fs::rename(temp_path, path)
+        .map_err(|error| format!("failed to replace file atomically: {error}"))
+}
+
+pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "target path has no parent directory".to_string())?;
+    if !parent.exists() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create parent directories: {error}"))?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("temp.tmp");
+    let temp_path = parent.join(format!("{file_name}.tmp"));
+
+    fs::write(&temp_path, contents)
+        .map_err(|error| format!("failed to write temp file: {error}"))?;
+    if let Err(error) = replace_file(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
+    }
+
+    Ok(())
+}
+
+/// Reads the subscription registry payload from the specified file path (or default vault path).
+pub fn load_subscription_registry(path: &Path) -> Result<SubscriptionRegistryPayload, String> {
+    if !path.exists() {
+        return Ok(SubscriptionRegistryPayload::default());
+    }
+    let json_text = read_utf8_sig(path)?;
+    serde_json::from_str(&json_text)
+        .map_err(|error| format!("failed to parse subscription registry: {error}"))
+}
+
+/// Saves the subscription registry payload atomically to the specified file path.
+pub fn save_subscription_registry(
+    path: &Path,
+    payload: &SubscriptionRegistryPayload,
+) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(payload)
+        .map_err(|error| format!("failed to serialize subscription registry: {error}"))?;
+    write_atomic(path, &bytes)
+}
+
+/// Analyzes price delta and checks for significant price increases (>= $0.50 and >= 2.0%).
+pub fn compute_price_delta(latest_amount: f64, median_amount: f64) -> Option<PriceDelta> {
+    let dollar_delta = round2(latest_amount - median_amount);
+    let percentage_delta = if median_amount > 0.001 {
+        round2((dollar_delta / median_amount) * 100.0)
+    } else {
+        0.0
+    };
+    let is_increase = dollar_delta >= 0.50 && percentage_delta >= 2.0;
+
+    Some(PriceDelta {
+        latest_amount: round2(latest_amount),
+        median_amount: round2(median_amount),
+        dollar_delta,
+        percentage_delta,
+        is_increase,
+    })
+}
+
+/// Generates renewal alerts based on cadence, projected next date, price changes, and registry metadata.
+pub fn evaluate_renewal_alerts(
+    cadence: RecurrenceCadence,
+    anchor_date: &str,
+    next_projected_date: &str,
+    price_delta: Option<&PriceDelta>,
+    metadata: Option<&SubscriptionMetadata>,
+) -> Vec<RenewalAlert> {
+    let mut alerts = Vec::new();
+
+    // 1. Trial Expiration Alert
+    if let Some(meta) = metadata {
+        if meta.is_trial {
+            if let Some(ref trial_end) = meta.trial_end_date {
+                if let Some(days_until) = days_between(anchor_date, trial_end) {
+                    let lead = meta.alert_lead_days.unwrap_or(7) as i32;
+                    if days_until >= 0 && days_until <= lead {
+                        alerts.push(RenewalAlert {
+                            kind: RenewalAlertKind::TrialExpiring,
+                            message: format!(
+                                "Free trial ending in {days_until} days (on {trial_end})"
+                            ),
+                            days_until: Some(days_until),
+                        });
+                    } else if days_until < 0 {
+                        alerts.push(RenewalAlert {
+                            kind: RenewalAlertKind::TrialExpiring,
+                            message: format!("Free trial expired {days_until} days ago"),
+                            days_until: Some(days_until),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Upcoming Renewal Alert (Annual or general configured lead days)
+    if let Some(days_until) = days_between(anchor_date, next_projected_date) {
+        let configured_lead = metadata
+            .and_then(|m| m.alert_lead_days)
+            .map(|d| d as i32)
+            .unwrap_or(if cadence == RecurrenceCadence::Annual {
+                30
+            } else {
+                7
+            });
+
+        if days_until >= 0 && days_until <= configured_lead {
+            let kind = if cadence == RecurrenceCadence::Annual {
+                RenewalAlertKind::AnnualRenewalDue
+            } else {
+                RenewalAlertKind::RenewalDue
+            };
+            let label = if cadence == RecurrenceCadence::Annual {
+                "Annual renewal due"
+            } else {
+                "Renewal charge due"
+            };
+            alerts.push(RenewalAlert {
+                kind,
+                message: format!("{label} in {days_until} days ({next_projected_date})"),
+                days_until: Some(days_until),
+            });
+        }
+    }
+
+    // 3. Price Hike Alert
+    if let Some(delta) = price_delta {
+        if delta.is_increase {
+            alerts.push(RenewalAlert {
+                kind: RenewalAlertKind::PriceHike,
+                message: format!(
+                    "Price increased by ${:.2} (+{:.1}%) above median baseline",
+                    delta.dollar_delta, delta.percentage_delta
+                ),
+                days_until: None,
+            });
+        }
+    }
+
+    alerts
+}
+
 /// Analyzes transactions and detects recurring obligations for `Expenses:...` accounts.
 /// Trailing 12-month window is computed relative to `reference_date` (or the latest transaction date).
+#[allow(dead_code)]
 pub fn analyze_recurring_obligations(
     transactions: &[Transaction],
     reference_date: Option<&str>,
 ) -> Vec<RecurringObligation> {
+    analyze_recurring_obligations_with_registry(
+        transactions,
+        reference_date,
+        &SubscriptionRegistryPayload::default(),
+    )
+}
+
+/// Enriched analyzer that joins ledger transaction telemetry with registry metadata.
+pub fn analyze_recurring_obligations_with_registry(
+    transactions: &[Transaction],
+    reference_date: Option<&str>,
+    registry: &SubscriptionRegistryPayload,
+) -> Vec<RecurringObligation> {
+    // Map registry entries by canonical key
+    let registry_map: BTreeMap<String, SubscriptionMetadata> = registry
+        .subscriptions
+        .iter()
+        .map(|meta| (meta.key.clone(), meta.clone()))
+        .collect();
+
     // Collect all chronological postings to Expenses:*
     let mut all_expense_postings: Vec<(String, String, String, f64)> = Vec::new();
     let mut latest_date_in_ledger = String::new();
@@ -202,6 +504,7 @@ pub fn analyze_recurring_obligations(
     for ((payee, account), mut txs) in groups {
         txs.sort_by(|a, b| a.0.cmp(&b.0));
         let last_date = txs.last().unwrap().0.clone();
+        let latest_amount = txs.last().unwrap().1;
 
         // Must have at least 1 posting in the trailing 12-month window
         let t12_postings: Vec<(String, f64)> = txs
@@ -292,38 +595,111 @@ pub fn analyze_recurring_obligations(
             let mean_amount = t12_amts.iter().sum::<f64>() / t12_amts.len() as f64;
 
             if let Some(next_projected_date) = cad.project_next(&last_date) {
+                let key = obligation_key(&payee, &account);
+                let metadata = registry_map.get(&key).cloned();
+                let price_delta = compute_price_delta(latest_amount, median_amount);
+                let alerts = evaluate_renewal_alerts(
+                    cad,
+                    anchor_date,
+                    &next_projected_date,
+                    price_delta.as_ref(),
+                    metadata.as_ref(),
+                );
+
                 obligations.push(RecurringObligation {
+                    key,
                     payee,
                     account,
                     cadence: cad,
+                    latest_amount: round2(latest_amount),
                     median_amount: round2(median_amount),
                     mean_amount: round2(mean_amount),
+                    price_delta,
+                    alerts,
                     median_interval_days: median_interval,
                     trailing_12m_count: t12_postings.len(),
                     total_count: txs.len(),
                     last_date,
                     next_projected_date,
+                    metadata,
                 });
             }
         }
     }
 
-    // Sort obligations by next projected date ascending, then payee ascending
+    // Sort obligations: items with active alerts first, then next projected date ascending, then payee ascending
     obligations.sort_by(|a, b| {
-        a.next_projected_date
-            .cmp(&b.next_projected_date)
+        let a_has_alerts = !a.alerts.is_empty();
+        let b_has_alerts = !b.alerts.is_empty();
+        b_has_alerts
+            .cmp(&a_has_alerts)
+            .then_with(|| a.next_projected_date.cmp(&b.next_projected_date))
             .then_with(|| a.payee.cmp(&b.payee))
     });
 
     obligations
 }
 
-/// Tauri command to retrieve recurring obligations from the ledger.
+/// Tauri command to retrieve recurring obligations enriched with registry metadata and alerts.
 #[tauri::command]
 pub fn get_recurring_obligations() -> Result<Vec<RecurringObligation>, String> {
     let ledger_content = read_ledger()?;
     let transactions = parse_ledger(&ledger_content);
-    Ok(analyze_recurring_obligations(&transactions, None))
+    let path = Path::new(SUBSCRIPTIONS_PATH);
+    let registry = if path.exists() {
+        load_subscription_registry(path)?
+    } else {
+        SubscriptionRegistryPayload::default()
+    };
+    let today = current_date_utc();
+    Ok(analyze_recurring_obligations_with_registry(
+        &transactions,
+        Some(&today),
+        &registry,
+    ))
+}
+
+/// Tauri command to retrieve raw subscription registry metadata payload from `subscriptions.json`.
+#[tauri::command]
+pub fn get_subscription_registry() -> Result<SubscriptionRegistryPayload, String> {
+    load_subscription_registry(Path::new(SUBSCRIPTIONS_PATH))
+}
+
+/// Tauri command to save or update an individual subscription's metadata in `subscriptions.json`.
+#[tauri::command]
+pub fn save_subscription_metadata(metadata: SubscriptionMetadata) -> Result<(), String> {
+    let path = Path::new(SUBSCRIPTIONS_PATH);
+    let mut payload = if path.exists() {
+        load_subscription_registry(path)?
+    } else {
+        SubscriptionRegistryPayload::default()
+    };
+
+    // Normalize metadata key if blank
+    let mut entry = metadata;
+    if entry.key.is_empty() {
+        entry.key = obligation_key(&entry.payee, &entry.account);
+    }
+
+    if let Some(existing) = payload
+        .subscriptions
+        .iter_mut()
+        .find(|item| item.key == entry.key)
+    {
+        *existing = entry;
+    } else {
+        payload.subscriptions.push(entry);
+    }
+
+    save_subscription_registry(path, &payload)
+}
+
+/// Tauri command to save the complete subscription registry payload.
+#[tauri::command]
+pub fn save_subscription_registry_payload(
+    payload: SubscriptionRegistryPayload,
+) -> Result<(), String> {
+    save_subscription_registry(Path::new(SUBSCRIPTIONS_PATH), &payload)
 }
 
 #[cfg(test)]
@@ -398,6 +774,7 @@ mod tests {
         let obligations = analyze_recurring_obligations(&txs, Some("2026-04-30"));
         assert_eq!(obligations.len(), 1);
         let nflx = &obligations[0];
+        assert_eq!(nflx.key, "Netflix::Expenses:Tech:Subscriptions");
         assert_eq!(nflx.payee, "Netflix");
         assert_eq!(nflx.account, "Expenses:Tech:Subscriptions");
         assert_eq!(nflx.cadence, RecurrenceCadence::Monthly);
@@ -527,9 +904,165 @@ mod tests {
         let obligations = analyze_recurring_obligations(&txs, Some("2026-02-15"));
         assert_eq!(obligations.len(), 1);
         let s = &obligations[0];
-        // 10.0 and 20.0 -> average is 15.0
         assert_eq!(s.median_amount, 15.0);
         assert_eq!(s.mean_amount, 15.0);
+    }
+
+    #[test]
+    fn test_price_increase_detection() {
+        let txs = vec![
+            Transaction {
+                date: "2026-01-01".to_string(),
+                payee: "Cloud Storage".to_string(),
+                narration: "".to_string(),
+                postings: vec![Posting {
+                    account: "Expenses:Tech:Subscriptions".to_string(),
+                    amount: 10.00,
+                }],
+            },
+            Transaction {
+                date: "2026-02-01".to_string(),
+                payee: "Cloud Storage".to_string(),
+                narration: "".to_string(),
+                postings: vec![Posting {
+                    account: "Expenses:Tech:Subscriptions".to_string(),
+                    amount: 10.00,
+                }],
+            },
+            Transaction {
+                date: "2026-03-01".to_string(),
+                payee: "Cloud Storage".to_string(),
+                narration: "".to_string(),
+                postings: vec![Posting {
+                    account: "Expenses:Tech:Subscriptions".to_string(),
+                    amount: 15.00, // Price hiked from 10.00 to 15.00 (+50%)
+                }],
+            },
+        ];
+
+        let obligations = analyze_recurring_obligations(&txs, Some("2026-03-15"));
+        assert_eq!(obligations.len(), 1);
+        let o = &obligations[0];
+        let delta = o.price_delta.as_ref().expect("Expected price delta");
+        assert_eq!(delta.latest_amount, 15.00);
+        assert_eq!(delta.median_amount, 10.00);
+        assert_eq!(delta.dollar_delta, 5.00);
+        assert_eq!(delta.percentage_delta, 50.0);
+        assert!(delta.is_increase);
+
+        // Check that a price hike alert was generated
+        assert!(o
+            .alerts
+            .iter()
+            .any(|a| a.kind == RenewalAlertKind::PriceHike));
+    }
+
+    #[test]
+    fn test_trial_and_renewal_radar() {
+        let txs = vec![
+            Transaction {
+                date: "2025-05-01".to_string(),
+                payee: "Annual Service".to_string(),
+                narration: "".to_string(),
+                postings: vec![Posting {
+                    account: "Expenses:Tech:Subscriptions".to_string(),
+                    amount: 100.0,
+                }],
+            },
+            Transaction {
+                date: "2026-05-01".to_string(),
+                payee: "Annual Service".to_string(),
+                narration: "".to_string(),
+                postings: vec![Posting {
+                    account: "Expenses:Tech:Subscriptions".to_string(),
+                    amount: 100.0,
+                }],
+            },
+        ];
+
+        let mut registry = SubscriptionRegistryPayload::default();
+        registry.subscriptions.push(SubscriptionMetadata {
+            key: "Annual Service::Expenses:Tech:Subscriptions".to_string(),
+            payee: "Annual Service".to_string(),
+            account: "Expenses:Tech:Subscriptions".to_string(),
+            billing_method: Some("Chase Visa".to_string()),
+            cancellation_url: Some("https://example.com/cancel".to_string()),
+            notes: Some("Cancel if not used".to_string()),
+            is_trial: true,
+            trial_end_date: Some("2026-05-10".to_string()),
+            alert_lead_days: Some(14),
+            custom_label: Some("Work Cloud".to_string()),
+            extra: BTreeMap::new(),
+        });
+
+        // Anchor on 2026-05-05 (5 days before trial expiration)
+        let obligations = analyze_recurring_obligations_with_registry(
+            &txs,
+            Some("2026-05-05"),
+            &registry,
+        );
+
+        assert_eq!(obligations.len(), 1);
+        let item = &obligations[0];
+        assert!(item.metadata.is_some());
+        assert_eq!(
+            item.metadata.as_ref().unwrap().cancellation_url,
+            Some("https://example.com/cancel".to_string())
+        );
+
+        let trial_alert = item
+            .alerts
+            .iter()
+            .find(|a| a.kind == RenewalAlertKind::TrialExpiring);
+        assert!(trial_alert.is_some());
+        assert_eq!(trial_alert.unwrap().days_until, Some(5));
+    }
+
+    #[test]
+    fn test_registry_file_atomic_roundtrip() {
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_subscriptions_roundtrip.json");
+        if test_file.exists() {
+            let _ = fs::remove_file(&test_file);
+        }
+
+        let mut payload = SubscriptionRegistryPayload::default();
+        payload.subscriptions.push(SubscriptionMetadata {
+            key: "TestPayee::Expenses:Misc".to_string(),
+            payee: "TestPayee".to_string(),
+            account: "Expenses:Misc".to_string(),
+            billing_method: Some("Amex".to_string()),
+            cancellation_url: Some("https://test.com/cancel".to_string()),
+            notes: Some("Test note".to_string()),
+            is_trial: false,
+            trial_end_date: None,
+            alert_lead_days: Some(30),
+            custom_label: None,
+            extra: BTreeMap::new(),
+        });
+
+        save_subscription_registry(&test_file, &payload).expect("save should succeed");
+        let loaded = load_subscription_registry(&test_file).expect("load should succeed");
+        assert_eq!(loaded.subscriptions.len(), 1);
+        assert_eq!(loaded.subscriptions[0].payee, "TestPayee");
+        assert_eq!(
+            loaded.subscriptions[0].cancellation_url,
+            Some("https://test.com/cancel".to_string())
+        );
+
+        let _ = fs::remove_file(&test_file);
+    }
+
+    #[test]
+    fn test_registry_corrupted_file_error_propagated() {
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_subscriptions_corrupted.json");
+        fs::write(&test_file, b"{\"subscriptions\": [ invalid json ").unwrap();
+
+        let result = load_subscription_registry(&test_file);
+        assert!(result.is_err(), "Corrupted registry should return Err, not default");
+
+        let _ = fs::remove_file(&test_file);
     }
 
     #[test]
@@ -582,8 +1115,12 @@ mod tests {
     fn test_live_ledger_recurring_obligations() {
         // If ledger is present on Google Drive, verify live detection
         if let Ok(obligations) = get_recurring_obligations() {
-            assert!(!obligations.is_empty(), "Expected recurring obligations to be detected from live ledger");
+            assert!(
+                !obligations.is_empty(),
+                "Expected recurring obligations to be detected from live ledger"
+            );
             for o in &obligations {
+                assert!(!o.key.is_empty());
                 assert!(!o.payee.is_empty());
                 assert!(o.account.starts_with("Expenses:"));
                 assert!(o.median_amount > 0.0);
