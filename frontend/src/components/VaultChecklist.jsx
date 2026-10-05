@@ -213,7 +213,14 @@ export default function VaultChecklist({ onNavigateToStatements = null }) {
                 <div className="space-y-2 flex-1">
                   {weekData.tasks.map((task, tIdx) => {
                     const taskStmts = getTaskMatchingStatements(task.title);
-                    const latestStmt = taskStmts.length > 0 ? taskStmts[taskStmts.length - 1] : null;
+                    // Select newest matching statement (sort descending by date, with modified_ms fallback)
+                    const sortedStmts = [...taskStmts].sort((a, b) => {
+                      const dateA = a.date || '';
+                      const dateB = b.date || '';
+                      if (dateA !== dateB) return dateB.localeCompare(dateA);
+                      return (b.modified_ms || 0) - (a.modified_ms || 0);
+                    });
+                    const latestStmt = sortedStmts.length > 0 ? sortedStmts[0] : null;
 
                     return (
                       <div 

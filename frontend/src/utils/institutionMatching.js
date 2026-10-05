@@ -87,15 +87,18 @@ export function findMatchingStatements(catalogStatements, institutionName, year 
     const matched = institutionsMatch(institutionName, stmt.institution);
     if (!matched) return false;
 
-    if (year && stmt.date && stmt.date.length >= 4) {
-      if (String(stmt.date.slice(0, 4)) !== String(year)) {
+    if (year != null) {
+      if (!stmt.date || stmt.date.length < 4 || String(stmt.date.slice(0, 4)) !== String(year)) {
         return false;
       }
     }
 
-    if (month != null && stmt.date && stmt.date.length >= 7) {
+    if (month != null) {
+      if (!stmt.date || stmt.date.length < 7) {
+        return false;
+      }
       const stmtMonth = parseInt(stmt.date.slice(5, 7), 10);
-      if (stmtMonth !== month) {
+      if (isNaN(stmtMonth) || stmtMonth !== month) {
         return false;
       }
     }
