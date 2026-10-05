@@ -24,6 +24,7 @@ pub fn run() {
             records::get_records,
             records::save_record,
             records::delete_record,
+            records::get_records_radar,
             statements::get_statement_catalog,
             statements::open_statement_file,
             sync::start_ledger_sync,

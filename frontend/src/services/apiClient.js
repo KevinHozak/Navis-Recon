@@ -177,4 +177,42 @@ export function saveSubscriptionMetadata(metadata) {
   })
 }
 
+export function getRecords() {
+  return request('/api/records', {
+    ipcCommand: 'get_records',
+    ipcArgs: {},
+  })
+}
+
+export function saveRecord(record) {
+  if (isDesktopRuntime()) {
+    return invoke('save_record', { record })
+  }
+  return request('/api/records', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(record),
+    ipcCommand: 'save_record',
+    ipcArgs: { record },
+  })
+}
+
+export function deleteRecord(id) {
+  if (isDesktopRuntime()) {
+    return invoke('delete_record', { id })
+  }
+  return request(`/api/records/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    ipcCommand: 'delete_record',
+    ipcArgs: { id },
+  })
+}
+
+export function getRecordsRadar(asOfDate = null) {
+  return request(`/api/records/radar${asOfDate ? `?as_of=${encodeURIComponent(asOfDate)}` : ''}`, {
+    ipcCommand: 'get_records_radar',
+    ipcArgs: { asOfDate: asOfDate || null },
+  })
+}
+
 export { API_BASE }

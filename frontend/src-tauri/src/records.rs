@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::obligations::{add_days, add_months, current_date_utc, days_between, parse_ymd};
+
 pub const INVENTORY_PATH: &str = r"G:\My Drive\Navis-Vault\Records\inventory.json";
 
 /// Core schema representing a single indexed household record.
@@ -22,8 +24,201 @@ pub struct HouseholdRecord {
     pub notes: Option<String>,
     #[serde(default)]
     pub status: Option<String>,
+    #[serde(default, rename = "recurrenceRule")]
+    pub recurrence_rule: Option<RecurrenceRule>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// Recurrence cadences for household document renewals.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecurrenceInterval {
+    Monthly,
+    Quarterly,
+    SemiAnnual,
+    Annual,
+    Biennial,      // Every 2 years
+    FiveYear,      // Every 5 years
+    TenYear,       // Every 10 years (e.g. US Adult Passport)
+    CustomYears(u32),
+    CustomMonths(u32),
+    CustomDays(u32),
+}
+
+/// Recurrence rule configuration for proactively rolling or planning renewals.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecurrenceRule {
+    pub interval: RecurrenceInterval,
+    #[serde(default, rename = "leadTimeDays")]
+    pub lead_time_days: Option<u32>,
+}
+
+impl RecurrenceRule {
+    #[allow(dead_code)]
+    pub fn new(interval: RecurrenceInterval) -> Self {
+        Self {
+            interval,
+            lead_time_days: None,
+        }
+    }
+
+    /// Calculates the next renewed expiration date given an existing date.
+    pub fn project_next_date(&self, from_date: &str) -> Option<String> {
+        let _ = parse_ymd(from_date)?;
+        match self.interval {
+            RecurrenceInterval::Monthly => add_months(from_date, 1),
+            RecurrenceInterval::Quarterly => add_months(from_date, 3),
+            RecurrenceInterval::SemiAnnual => add_months(from_date, 6),
+            RecurrenceInterval::Annual => add_months(from_date, 12),
+            RecurrenceInterval::Biennial => add_months(from_date, 24),
+            RecurrenceInterval::FiveYear => add_months(from_date, 60),
+            RecurrenceInterval::TenYear => add_months(from_date, 120),
+            RecurrenceInterval::CustomYears(years) => {
+                let months = (years as i32).checked_mul(12)?;
+                add_months(from_date, months)
+            }
+            RecurrenceInterval::CustomMonths(months) => add_months(from_date, months as i32),
+            RecurrenceInterval::CustomDays(days) => add_days(from_date, days as i32),
+        }
+    }
+}
+
+/// Time-sensitive health bucket for an indexed household record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordHealthBucket {
+    Expired,   // Days remaining < 0
+    Critical,  // Due in <= 30 days
+    Upcoming,  // Due in <= 90 days (and > 30 days)
+    Healthy,   // Due in > 90 days or no expiration
+}
+
+impl RecordHealthBucket {
+    #[allow(dead_code)]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RecordHealthBucket::Expired => "expired",
+            RecordHealthBucket::Critical => "critical",
+            RecordHealthBucket::Upcoming => "upcoming",
+            RecordHealthBucket::Healthy => "healthy",
+        }
+    }
+}
+
+/// Evaluated radar telemetry for a record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecordRadarItem {
+    pub record: HouseholdRecord,
+    pub bucket: RecordHealthBucket,
+    #[serde(rename = "daysUntilExpiration")]
+    pub days_until_expiration: Option<i32>,
+    #[serde(rename = "nextRenewalDate")]
+    pub next_renewal_date: Option<String>,
+    #[serde(rename = "isActionRequired")]
+    pub is_action_required: bool,
+}
+
+/// Summary counts across all health buckets for shell dashboards and sidebar badges.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordRadarSummary {
+    pub total: usize,
+    pub expired: usize,
+    pub critical: usize,
+    pub upcoming: usize,
+    pub healthy: usize,
+    #[serde(rename = "actionRequired")]
+    pub action_required: usize,
+}
+
+/// Full radar inspection payload returned to the Tauri frontend.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RecordRadarReport {
+    pub summary: RecordRadarSummary,
+    pub items: Vec<RecordRadarItem>,
+    #[serde(rename = "asOfDate")]
+    pub as_of_date: String,
+}
+
+/// Computes the health bucket and days until expiration for a given expiration date.
+pub fn classify_expiration(
+    expiration_date: Option<&str>,
+    as_of_date: &str,
+) -> (RecordHealthBucket, Option<i32>) {
+    let exp_str = match expiration_date {
+        Some(s) if !s.trim().is_empty() => s.trim(),
+        _ => return (RecordHealthBucket::Healthy, None),
+    };
+
+    match days_between(as_of_date, exp_str) {
+        Some(days) => {
+            if days < 0 {
+                (RecordHealthBucket::Expired, Some(days))
+            } else if days <= 30 {
+                (RecordHealthBucket::Critical, Some(days))
+            } else if days <= 90 {
+                (RecordHealthBucket::Upcoming, Some(days))
+            } else {
+                (RecordHealthBucket::Healthy, Some(days))
+            }
+        }
+        None => (RecordHealthBucket::Healthy, None),
+    }
+}
+
+/// Evaluates a single record against an as_of date.
+pub fn evaluate_record_radar(record: &HouseholdRecord, as_of_date: &str) -> RecordRadarItem {
+    let (bucket, days) = classify_expiration(record.expiration_date.as_deref(), as_of_date);
+
+    // If a custom lead time is specified in the recurrence rule, honor it for actionRequired.
+    // Otherwise, default to triggering action on Expired and Critical (<= 30 days).
+    let is_action_required = match (days, &record.recurrence_rule) {
+        (Some(d), Some(rule)) if rule.lead_time_days.is_some() => {
+            let lead_days = rule.lead_time_days.unwrap() as i32;
+            d <= lead_days
+        }
+        _ => matches!(bucket, RecordHealthBucket::Expired | RecordHealthBucket::Critical),
+    };
+
+    let next_renewal_date = match (&record.expiration_date, &record.recurrence_rule) {
+        (Some(exp), Some(rule)) if !exp.trim().is_empty() => rule.project_next_date(exp.trim()),
+        _ => None,
+    };
+
+    RecordRadarItem {
+        record: record.clone(),
+        bucket,
+        days_until_expiration: days,
+        next_renewal_date,
+        is_action_required,
+    }
+}
+
+/// Generates a complete radar report for a list of records.
+pub fn generate_radar_report(records: &[HouseholdRecord], as_of_date: &str) -> RecordRadarReport {
+    let mut summary = RecordRadarSummary::default();
+    let mut items = Vec::with_capacity(records.len());
+
+    for record in records {
+        let item = evaluate_record_radar(record, as_of_date);
+        summary.total += 1;
+        match item.bucket {
+            RecordHealthBucket::Expired => summary.expired += 1,
+            RecordHealthBucket::Critical => summary.critical += 1,
+            RecordHealthBucket::Upcoming => summary.upcoming += 1,
+            RecordHealthBucket::Healthy => summary.healthy += 1,
+        }
+        if item.is_action_required {
+            summary.action_required += 1;
+        }
+        items.push(item);
+    }
+
+    RecordRadarReport {
+        summary,
+        items,
+        as_of_date: as_of_date.to_string(),
+    }
 }
 
 /// Inventory envelope for local-first persistence.
@@ -251,6 +446,28 @@ pub fn delete_record(id: String) -> Result<bool, String> {
     Ok(removed)
 }
 
+#[tauri::command]
+pub fn get_records_radar(as_of_date: Option<String>) -> Result<RecordRadarReport, String> {
+    let inventory = load_inventory_from_path(&inventory_path())?;
+    let effective_date = match as_of_date {
+        Some(ref d) => {
+            let trimmed = d.trim();
+            if trimmed.is_empty() {
+                current_date_utc()
+            } else if !is_valid_date_format(trimmed) {
+                return Err(format!(
+                    "Invalid as_of_date format for '{}'. Expected YYYY-MM-DD",
+                    trimmed
+                ));
+            } else {
+                trimmed.to_string()
+            }
+        }
+        None => current_date_utc(),
+    };
+    Ok(generate_radar_report(&inventory.records, &effective_date))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +483,7 @@ mod tests {
             file_path: Some("Vault/Personal/passport.pdf".to_string()),
             notes: Some("Kept in physical safe".to_string()),
             status: Some("Active".to_string()),
+            recurrence_rule: None,
             extra: BTreeMap::new(),
         };
         assert!(validate_record(&valid).is_ok());
@@ -318,6 +536,7 @@ mod tests {
             file_path: Some("Docs/deed.pdf".to_string()),
             notes: None,
             status: Some("Active".to_string()),
+            recurrence_rule: None,
             extra: BTreeMap::new(),
         };
 
@@ -347,6 +566,7 @@ mod tests {
             file_path: Some("Safe/car_title.pdf".to_string()),
             notes: None,
             status: Some("Active".to_string()),
+            recurrence_rule: None,
             extra: BTreeMap::new(),
         };
 
@@ -372,5 +592,240 @@ mod tests {
         assert_eq!(reloaded2.records[0].notes, Some("Updated note".to_string()));
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_classify_expiration_buckets() {
+        let as_of = "2026-10-05";
+
+        // Expired (yesterday)
+        let (bucket, days) = classify_expiration(Some("2026-10-04"), as_of);
+        assert_eq!(bucket, RecordHealthBucket::Expired);
+        assert_eq!(days, Some(-1));
+
+        // Critical (due today = 0 days, due in 30 days)
+        let (b_today, d_today) = classify_expiration(Some("2026-10-05"), as_of);
+        assert_eq!(b_today, RecordHealthBucket::Critical);
+        assert_eq!(d_today, Some(0));
+
+        let (b_30, d_30) = classify_expiration(Some("2026-11-04"), as_of);
+        assert_eq!(b_30, RecordHealthBucket::Critical);
+        assert_eq!(d_30, Some(30));
+
+        // Upcoming (due in 31 days to 90 days)
+        let (b_31, d_31) = classify_expiration(Some("2026-11-05"), as_of);
+        assert_eq!(b_31, RecordHealthBucket::Upcoming);
+        assert_eq!(d_31, Some(31));
+
+        let (b_90, d_90) = classify_expiration(Some("2027-01-03"), as_of);
+        assert_eq!(b_90, RecordHealthBucket::Upcoming);
+        assert_eq!(d_90, Some(90));
+
+        // Healthy (> 90 days)
+        let (b_91, d_91) = classify_expiration(Some("2027-01-04"), as_of);
+        assert_eq!(b_91, RecordHealthBucket::Healthy);
+        assert_eq!(d_91, Some(91));
+
+        // Healthy (no expiration date or empty)
+        let (b_none, d_none) = classify_expiration(None, as_of);
+        assert_eq!(b_none, RecordHealthBucket::Healthy);
+        assert_eq!(d_none, None);
+
+        let (b_empty, d_empty) = classify_expiration(Some("   "), as_of);
+        assert_eq!(b_empty, RecordHealthBucket::Healthy);
+        assert_eq!(d_empty, None);
+    }
+
+    #[test]
+    fn test_recurrence_projections() {
+        let annual_rule = RecurrenceRule::new(RecurrenceInterval::Annual);
+        assert_eq!(
+            annual_rule.project_next_date("2026-10-05"),
+            Some("2027-10-05".to_string())
+        );
+
+        let passport_rule = RecurrenceRule::new(RecurrenceInterval::TenYear);
+        assert_eq!(
+            passport_rule.project_next_date("2025-06-15"),
+            Some("2035-06-15".to_string())
+        );
+
+        let biennial_rule = RecurrenceRule::new(RecurrenceInterval::Biennial);
+        assert_eq!(
+            biennial_rule.project_next_date("2026-03-01"),
+            Some("2028-03-01".to_string())
+        );
+
+        let custom_years = RecurrenceRule::new(RecurrenceInterval::CustomYears(3));
+        assert_eq!(
+            custom_years.project_next_date("2024-01-10"),
+            Some("2027-01-10".to_string())
+        );
+
+        // Leap year clamping (e.g. Feb 29 -> Feb 28 on non-leap year)
+        assert_eq!(
+            annual_rule.project_next_date("2024-02-29"),
+            Some("2025-02-28".to_string())
+        );
+    }
+
+    #[test]
+    fn test_generate_radar_report_summary() {
+        let as_of = "2026-10-05";
+        let records = vec![
+            HouseholdRecord {
+                id: "rec-exp".to_string(),
+                title: "Expired Registration".to_string(),
+                category: "Vehicles".to_string(),
+                owner: "Kevin".to_string(),
+                expiration_date: Some("2026-09-01".to_string()),
+                file_path: None,
+                notes: None,
+                status: None,
+                recurrence_rule: Some(RecurrenceRule::new(RecurrenceInterval::Annual)),
+                extra: BTreeMap::new(),
+            },
+            HouseholdRecord {
+                id: "rec-crit".to_string(),
+                title: "Driver License".to_string(),
+                category: "Identity".to_string(),
+                owner: "Kevin".to_string(),
+                expiration_date: Some("2026-10-20".to_string()), // 15 days out
+                file_path: None,
+                notes: None,
+                status: None,
+                recurrence_rule: Some(RecurrenceRule::new(RecurrenceInterval::FiveYear)),
+                extra: BTreeMap::new(),
+            },
+            HouseholdRecord {
+                id: "rec-up".to_string(),
+                title: "Home Insurance Policy".to_string(),
+                category: "Insurance".to_string(),
+                owner: "Family".to_string(),
+                expiration_date: Some("2026-12-01".to_string()), // 57 days out
+                file_path: None,
+                notes: None,
+                status: None,
+                recurrence_rule: Some(RecurrenceRule::new(RecurrenceInterval::Annual)),
+                extra: BTreeMap::new(),
+            },
+            HouseholdRecord {
+                id: "rec-health".to_string(),
+                title: "Passport".to_string(),
+                category: "Identity".to_string(),
+                owner: "Kevin".to_string(),
+                expiration_date: Some("2034-05-01".to_string()),
+                file_path: None,
+                notes: None,
+                status: None,
+                recurrence_rule: Some(RecurrenceRule::new(RecurrenceInterval::TenYear)),
+                extra: BTreeMap::new(),
+            },
+            HouseholdRecord {
+                id: "rec-none".to_string(),
+                title: "Social Security Card".to_string(),
+                category: "Identity".to_string(),
+                owner: "Kevin".to_string(),
+                expiration_date: None,
+                file_path: None,
+                notes: None,
+                status: None,
+                recurrence_rule: None,
+                extra: BTreeMap::new(),
+            },
+        ];
+
+        let report = generate_radar_report(&records, as_of);
+        assert_eq!(report.summary.total, 5);
+        assert_eq!(report.summary.expired, 1);
+        assert_eq!(report.summary.critical, 1);
+        assert_eq!(report.summary.upcoming, 1);
+        assert_eq!(report.summary.healthy, 2); // 1 far date + 1 without date
+        assert_eq!(report.summary.action_required, 2); // expired + critical
+
+        // Check renewal projection on item 0
+        let exp_item = &report.items[0];
+        assert_eq!(exp_item.bucket, RecordHealthBucket::Expired);
+        assert_eq!(exp_item.next_renewal_date, Some("2027-09-01".to_string()));
+        assert!(exp_item.is_action_required);
+
+        // Check license renewal on item 1
+        let crit_item = &report.items[1];
+        assert_eq!(crit_item.bucket, RecordHealthBucket::Critical);
+        assert_eq!(crit_item.next_renewal_date, Some("2031-10-20".to_string()));
+        assert!(crit_item.is_action_required);
+    }
+
+    #[test]
+    fn test_lead_time_days_action_required() {
+        let as_of = "2026-10-05";
+
+        // Record expiring in 45 days with a 60-day lead time -> bucket is Upcoming, but action is required
+        let rec_lead_60 = HouseholdRecord {
+            id: "rec-lead-60".to_string(),
+            title: "Car Insurance Renewal".to_string(),
+            category: "Insurance".to_string(),
+            owner: "Kevin".to_string(),
+            expiration_date: Some("2026-11-19".to_string()), // 45 days out
+            file_path: None,
+            notes: None,
+            status: None,
+            recurrence_rule: Some(RecurrenceRule {
+                interval: RecurrenceInterval::Annual,
+                lead_time_days: Some(60),
+            }),
+            extra: BTreeMap::new(),
+        };
+
+        let item = evaluate_record_radar(&rec_lead_60, as_of);
+        assert_eq!(item.bucket, RecordHealthBucket::Upcoming);
+        assert_eq!(item.days_until_expiration, Some(45));
+        assert!(item.is_action_required);
+
+        // Record expiring in 20 days with a 7-day lead time -> bucket is Critical, but action required is suppressed until 7 days
+        let rec_lead_7 = HouseholdRecord {
+            id: "rec-lead-7".to_string(),
+            title: "Short Notice Item".to_string(),
+            category: "Home".to_string(),
+            owner: "Kevin".to_string(),
+            expiration_date: Some("2026-10-25".to_string()), // 20 days out
+            file_path: None,
+            notes: None,
+            status: None,
+            recurrence_rule: Some(RecurrenceRule {
+                interval: RecurrenceInterval::Monthly,
+                lead_time_days: Some(7),
+            }),
+            extra: BTreeMap::new(),
+        };
+
+        let item_7 = evaluate_record_radar(&rec_lead_7, as_of);
+        assert_eq!(item_7.bucket, RecordHealthBucket::Critical);
+        assert_eq!(item_7.days_until_expiration, Some(20));
+        assert!(!item_7.is_action_required); // 20 > 7
+    }
+
+    #[test]
+    fn test_as_of_date_validation() {
+        // Valid date returns Ok
+        let res_valid = get_records_radar(Some("2026-10-05".to_string()));
+        assert!(res_valid.is_ok());
+
+        // Empty string defaults to current date (Ok)
+        let res_empty = get_records_radar(Some("".to_string()));
+        assert!(res_empty.is_ok());
+
+        // None defaults to current date (Ok)
+        let res_none = get_records_radar(None);
+        assert!(res_none.is_ok());
+
+        // Invalid month/date formats return Err
+        let res_invalid_month = get_records_radar(Some("2026-13-01".to_string()));
+        assert!(res_invalid_month.is_err());
+        assert!(res_invalid_month.unwrap_err().contains("Invalid as_of_date format"));
+
+        let res_malformed = get_records_radar(Some("not-a-date".to_string()));
+        assert!(res_malformed.is_err());
+        assert!(res_malformed.unwrap_err().contains("Invalid as_of_date format"));
     }
 }
