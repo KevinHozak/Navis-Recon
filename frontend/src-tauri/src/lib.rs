@@ -16,6 +16,7 @@ pub fn run() {
             ledger_parser::get_ledger_history,
             ledger_parser::get_ledger_transactions,
             statements::get_statement_catalog,
+            statements::open_statement_file,
             sync::start_ledger_sync,
             sync::commit_ledger_sync,
             ping
