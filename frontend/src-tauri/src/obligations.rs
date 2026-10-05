@@ -240,7 +240,12 @@ pub fn analyze_recurring_obligations(
         let cv = variance.sqrt() / mean_diff;
 
         diffs.sort_unstable();
-        let median_interval = diffs[diffs.len() / 2];
+        let median_interval = if diffs.len() % 2 == 1 {
+            diffs[diffs.len() / 2]
+        } else {
+            let mid = diffs.len() / 2;
+            ((diffs[mid - 1] + diffs[mid]) as f64 / 2.0).round() as i32
+        };
 
         // Cadence classification
         let cadence = if (6..=8).contains(&median_interval) && t12_postings.len() >= 6 && cv <= 0.60
@@ -278,7 +283,12 @@ pub fn analyze_recurring_obligations(
         if let Some(cad) = cadence {
             let mut t12_amts: Vec<f64> = t12_postings.iter().map(|(_, a)| *a).collect();
             t12_amts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let median_amount = t12_amts[t12_amts.len() / 2];
+            let median_amount = if t12_amts.len() % 2 == 1 {
+                t12_amts[t12_amts.len() / 2]
+            } else {
+                let mid = t12_amts.len() / 2;
+                (t12_amts[mid - 1] + t12_amts[mid]) / 2.0
+            };
             let mean_amount = t12_amts.iter().sum::<f64>() / t12_amts.len() as f64;
 
             if let Some(next_projected_date) = cad.project_next(&last_date) {
@@ -489,6 +499,37 @@ mod tests {
         assert_eq!(b.cadence, RecurrenceCadence::Biweekly);
         assert_eq!(b.last_date, "2026-02-13");
         assert_eq!(b.next_projected_date, "2026-02-27");
+    }
+
+    #[test]
+    fn test_even_count_median_calculation() {
+        let txs = vec![
+            Transaction {
+                date: "2026-01-01".to_string(),
+                payee: "Streaming".to_string(),
+                narration: "".to_string(),
+                postings: vec![Posting {
+                    account: "Expenses:Tech:Subscriptions".to_string(),
+                    amount: 10.0,
+                }],
+            },
+            Transaction {
+                date: "2026-02-01".to_string(),
+                payee: "Streaming".to_string(),
+                narration: "".to_string(),
+                postings: vec![Posting {
+                    account: "Expenses:Tech:Subscriptions".to_string(),
+                    amount: 20.0,
+                }],
+            },
+        ];
+
+        let obligations = analyze_recurring_obligations(&txs, Some("2026-02-15"));
+        assert_eq!(obligations.len(), 1);
+        let s = &obligations[0];
+        // 10.0 and 20.0 -> average is 15.0
+        assert_eq!(s.median_amount, 15.0);
+        assert_eq!(s.mean_amount, 15.0);
     }
 
     #[test]
