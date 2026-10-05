@@ -4,14 +4,16 @@ import OverviewWidget from './components/OverviewWidget'
 import CategoryDetailWidget from './components/CategoryDetailWidget'
 import VaultChecklist from './components/VaultChecklist'
 import StatementLibraryWidget from './components/StatementLibraryWidget'
+import SubscriptionsWidget from './components/SubscriptionsWidget'
 import SyncWidget from './components/SyncWidget'
 import WealthDashboardWidget from './components/WealthDashboardWidget'
-import { ping, request } from './services/apiClient'
+import { ping, request, getRecurringObligations } from './services/apiClient'
 import './index.css'
 
 function App() {
   const [currentView, setCurrentView] = useState('overview');
   const [pendingCount, setPendingCount] = useState(0);
+  const [alertObligationsCount, setAlertObligationsCount] = useState(0);
   const [desktopStatus, setDesktopStatus] = useState('checking');
   const [statementFilter, setStatementFilter] = useState(null);
 
@@ -46,9 +48,28 @@ function App() {
       }
     };
 
+    const updateObligationAlerts = async () => {
+      try {
+        const obligations = await getRecurringObligations();
+        if (isMounted && Array.isArray(obligations)) {
+          const totalAlerts = obligations.reduce(
+            (acc, curr) => acc + (curr.alerts ? curr.alerts.length : 0),
+            0
+          );
+          setAlertObligationsCount(totalAlerts);
+        }
+      } catch (e) {
+        console.warn('Failed to fetch recurring obligations alert count:', e);
+      }
+    };
+
     updatePendingCount();
+    updateObligationAlerts();
     // Refresh count every 10 seconds to keep sidebar accurate
-    const interval = setInterval(updatePendingCount, 10000);
+    const interval = setInterval(() => {
+      updatePendingCount();
+      updateObligationAlerts();
+    }, 10000);
     return () => {
       isMounted = false;
       clearInterval(interval);
@@ -93,6 +114,21 @@ function App() {
             
             <button 
               type="button"
+              onClick={() => setCurrentView('subscriptions')}
+              className={`w-full flex items-center justify-between p-3 text-sm font-bold uppercase tracking-widest rounded transition-all ${currentView === 'subscriptions' ? 'bg-accent/10 text-accent border border-accent/30' : 'text-white/50 hover:bg-white/5 hover:text-white border border-transparent'}`}
+            >
+              <div className="flex items-center gap-3">
+                <span className={currentView === 'subscriptions' ? 'text-accent' : 'opacity-70'}>💳</span> Subscriptions
+              </div>
+              {alertObligationsCount > 0 && (
+                <span className="bg-amber-500/20 text-amber-300 border border-amber-500/50 px-2 py-0.5 rounded text-[10px]">
+                  {alertObligationsCount}
+                </span>
+              )}
+            </button>
+
+            <button 
+              type="button"
               onClick={() => setCurrentView('reviews')}
               className={`w-full flex items-center justify-between p-3 text-sm font-bold uppercase tracking-widest rounded transition-all ${currentView === 'reviews' ? 'bg-accent/10 text-accent border border-accent/30' : 'text-white/50 hover:bg-white/5 hover:text-white border border-transparent'}`}
             >
@@ -131,6 +167,12 @@ function App() {
           {currentView === 'reviews' && (
             <div className="bg-zinc-900/50 p-8 rounded-lg border border-white/5 shadow-2xl">
               <LedgerReviewWidget />
+            </div>
+          )}
+
+          {currentView === 'subscriptions' && (
+            <div className="h-full">
+              <SubscriptionsWidget />
             </div>
           )}
 
