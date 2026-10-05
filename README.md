@@ -32,60 +32,79 @@ Unlike bloated third-party SaaS budgeting tools or complex gaming-themed lore po
 
 ```
 Navis-Recon/
-├── backend/
-│   ├── main.py              # FastAPI application & Beancount loader API (Port 8080)
-│   └── requirements.txt     # Python dependencies
 ├── frontend/
-│   ├── src/                 # React 19 SPA (Port 5173)
+│   ├── src/                 # React 19 SPA
 │   │   ├── components/      # LedgerReviewWidget, WealthDashboardWidget, SyncWidget, etc.
+│   │   ├── services/        # apiClient.js (Tauri IPC invoke & event streaming)
 │   │   └── App.jsx          # Primary shell & view router
+│   ├── src-tauri/           # Native Rust Tauri v2 core
+│   │   ├── src/
+│   │   │   ├── checklist.rs     # Direct atomic checklist.json I/O
+│   │   │   ├── ledger_parser.rs # Native Beancount parser & balance realized curves
+│   │   │   ├── ledger_review.rs # Transaction scanning & atomic approval mutations
+│   │   │   ├── sync.rs          # Harvester subprocess bridge & live event bus
+│   │   │   └── lib.rs           # Tauri app handler & IPC command registry
+│   │   ├── tauri.conf.json  # Window configuration & desktop permissions
+│   │   └── Cargo.toml       # Rust dependencies
 │   ├── index.html           # PWA entrypoint
 │   └── vite.config.js       # Vite 8 & PWA configuration
 ├── docs/
-│   └── architecture.md      # Detailed system blueprints & vault mandates
-├── start_all.vbs            # Detached dual-service launcher
-└── Stop_Recon.bat           # Port 8080 / 5173 process termination script
+│   ├── architecture.md      # Detailed system blueprints & IPC specifications
+│   └── archive/             # Archived FastAPI server & legacy run scripts
+├── scripts/                 # Desktop deployment & packaging automation
+├── start.bat                # Launch packaged Navis-Recon.exe desktop app
+├── stop.bat                 # Terminate running Navis-Recon processes
+└── Navis-Recon.exe          # Standalone release desktop executable
 ```
 
 ### Stack Components
+* **Desktop Shell:** [Tauri v2](https://v2.tauri.app/) (Windows native desktop window, IPC bridge, event streaming).
+* **Accounting Engine:** Native Rust (`ledger_parser.rs`, `ledger_review.rs`) with atomic file replacements.
 * **Frontend:** [React 19](https://react.dev/), [Vite 8](https://vite.dev/), [Tailwind CSS v4](https://tailwindcss.com/), [Lucide Icons](https://lucide.dev/), [Recharts](https://recharts.org/), [Framer Motion](https://www.framer.com/motion/).
-* **Backend:** [FastAPI](https://fastapi.tiangolo.com/), [Uvicorn](https://www.uvicorn.org/), Python 3.14.
-* **Accounting Engine:** [Beancount](https://beancount.github.io/) (Pure Python AST parser).
-* **Data Manifold:** Sourced securely from `G:\My Drive\Navis-Vault\Ledger\Sovereign.beancount`.
+* **Data Manifold:** Sourced securely from `G:\My Drive\Navis-Vault\Ledger\Sovereign.beancount` and `checklist.json`.
+* **Harvester Bridge:** Python financial artifact classifier (`finance_processor.py`) orchestrated directly via Tauri child processes without a web server.
 
 ---
 
 ## 🚀 Getting Started
 
 ### Prerequisites
-* **Python 3.11+** with `beancount`, `fastapi`, and `uvicorn` installed.
+* **Rust 1.78+** and Cargo (`rustup default stable`).
 * **Node.js 20+** and `npm`.
 * Local access to the Navis-Vault ledger directory.
 
-### Quick Start (Windows)
-To launch both the FastAPI backend and Vite frontend silently in the background:
+### Quick Start (Desktop)
+To launch the compiled standalone desktop application:
 ```cmd
-start_all.vbs
+start.bat
 ```
 
-To stop all running services:
+To close or terminate running instances:
 ```cmd
-Stop_Recon.bat
+stop.bat
 ```
 
-### Manual Development
+### Development Workflow
 
-#### Backend
-```bash
-cd backend
-python main.py
-# API runs at http://localhost:8080 (Swagger UI at http://localhost:8080/docs)
-```
-
-#### Frontend
+#### 1. Desktop Development Mode (Vite + Tauri Dev)
+Runs the desktop window with hot reloading for both React frontend and Rust backend:
 ```bash
 cd frontend
 npm install
+npm run desktop
+```
+
+#### 2. Building the Standalone Desktop Executable
+Compiles the optimized Rust binary, packages the desktop bundle, and places `Navis-Recon.exe` directly in the repository root:
+```bash
+cd frontend
+npm run desktop:build
+```
+
+#### 3. Frontend-Only Development (Vite Dev Server)
+If inspecting UI styling or components in a browser:
+```bash
+cd frontend
 npm run dev
 # Interface opens at http://localhost:5173
 ```
