@@ -150,4 +150,31 @@ export function openStatementFile(path) {
   })
 }
 
+export function getRecurringObligations() {
+  return request('/api/obligations/recurring', {
+    ipcCommand: 'get_recurring_obligations',
+    ipcArgs: {},
+  })
+}
+
+export function getSubscriptionRegistry() {
+  return request('/api/obligations/registry', {
+    ipcCommand: 'get_subscription_registry',
+    ipcArgs: {},
+  })
+}
+
+export function saveSubscriptionMetadata(metadata) {
+  if (isDesktopRuntime()) {
+    return invoke('save_subscription_metadata', { metadata })
+  }
+  return request('/api/obligations/metadata', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(metadata),
+    ipcCommand: 'save_subscription_metadata',
+    ipcArgs: { metadata },
+  })
+}
+
 export { API_BASE }
