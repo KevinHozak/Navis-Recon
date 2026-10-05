@@ -3,6 +3,7 @@ import LedgerReviewWidget from './components/LedgerReviewWidget'
 import OverviewWidget from './components/OverviewWidget'
 import CategoryDetailWidget from './components/CategoryDetailWidget'
 import VaultChecklist from './components/VaultChecklist'
+import StatementLibraryWidget from './components/StatementLibraryWidget'
 import SyncWidget from './components/SyncWidget'
 import WealthDashboardWidget from './components/WealthDashboardWidget'
 import { ping, request } from './services/apiClient'
@@ -77,6 +78,7 @@ function App() {
             {navButton('overview', '📊', 'Overview')}
             {navButton('wealth', '🏦', 'The Vault')}
             {navButton('sync', '🔄', 'Sync & Import')}
+            {navButton('statements', '📂', 'Statements')}
             {navButton('checklist', '⚖️', 'Checklist')}
             
             <button 
@@ -119,6 +121,12 @@ function App() {
           {currentView === 'reviews' && (
             <div className="bg-zinc-900/50 p-8 rounded-lg border border-white/5 shadow-2xl">
               <LedgerReviewWidget />
+            </div>
+          )}
+
+          {currentView === 'statements' && (
+            <div className="h-full">
+              <StatementLibraryWidget />
             </div>
           )}
 

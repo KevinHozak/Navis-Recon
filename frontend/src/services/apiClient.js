@@ -130,4 +130,24 @@ export async function listenForSyncEvents(handlers) {
   return () => Promise.all(unlisteners.map((unlisten) => unlisten()))
 }
 
+export function getStatementCatalog(customPath = null) {
+  return request(`/api/statements/catalog${customPath ? `?path=${encodeURIComponent(customPath)}` : ''}`, {
+    ipcCommand: 'get_statement_catalog',
+    ipcArgs: { customPath: customPath || null },
+  })
+}
+
+export function openStatementFile(path) {
+  if (isDesktopRuntime()) {
+    return invoke('open_statement_file', { path })
+  }
+  return request('/api/statements/open', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+    ipcCommand: 'open_statement_file',
+    ipcArgs: { path },
+  })
+}
+
 export { API_BASE }

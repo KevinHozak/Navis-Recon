@@ -461,6 +461,46 @@ pub fn get_statement_catalog(custom_path: Option<String>) -> Result<StatementCat
     Ok(scan_statement_directory(&base_dir))
 }
 
+/// Tauri IPC command to open a statement PDF with the system default viewer.
+#[tauri::command]
+pub fn open_statement_file(path: String) -> Result<(), String> {
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err(format!("File does not exist: {}", path));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        // Use cmd /C start "" "path" to launch with system default application
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &path])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("Failed to open file: {e}"))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Failed to open file: {e}"))?;
+        Ok(())
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Failed to open file: {e}"))?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,6 +515,13 @@ mod tests {
         assert_eq!(date, Some("2026-01-15".to_string()));
         assert_eq!(disambig, None);
         assert!(canonical);
+    }
+
+    #[test]
+    fn test_open_statement_file_nonexistent() {
+        let res = open_statement_file("C:\\nonexistent_dir_12345\\fake_statement.pdf".to_string());
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("File does not exist"));
     }
 
     #[test]
