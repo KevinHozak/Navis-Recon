@@ -157,14 +157,32 @@ pub fn detect_statement_anomalies(statements: &[StatementMetadata]) -> Vec<State
 
         for (date, date_stmts) in &by_date {
             if date_stmts.len() > 1 {
-                // Check if any have identical filename/disambiguation or identical size
+                // Check all pairs for exact duplicate identity
                 let mut exact_matches = false;
-                let first_filename = &date_stmts[0].filename;
-                let first_size = date_stmts[0].size_bytes;
+                for i in 0..date_stmts.len() {
+                    for j in (i + 1)..date_stmts.len() {
+                        let a = date_stmts[i];
+                        let b = date_stmts[j];
 
-                for other in &date_stmts[1..] {
-                    if other.filename == *first_filename || other.size_bytes == first_size {
-                        exact_matches = true;
+                        // If paths exist on disk, compare exact byte content; otherwise fallback to exact filename or exact size
+                        let same_content = if !a.path.is_empty()
+                            && !b.path.is_empty()
+                            && a.size_bytes == b.size_bytes
+                        {
+                            match (fs::read(&a.path), fs::read(&b.path)) {
+                                (Ok(bytes_a), Ok(bytes_b)) => bytes_a == bytes_b,
+                                _ => a.filename == b.filename,
+                            }
+                        } else {
+                            a.filename == b.filename
+                        };
+
+                        if same_content {
+                            exact_matches = true;
+                            break;
+                        }
+                    }
+                    if exact_matches {
                         break;
                     }
                 }
@@ -220,8 +238,36 @@ pub fn detect_statement_anomalies(statements: &[StatementMetadata]) -> Vec<State
             }
         }
 
-        // Only analyze gaps for institutions with 3 or more statement months spanning at least 3 months
-        if present_months.len() >= 3 {
+        // Calculate inter-statement month step differences to infer cadence.
+        // If an institution consistently issues statements annually or quarterly,
+        // it shouldn't be flagged for missing every intermediate calendar month.
+        let months_vec: Vec<(i32, u32)> = present_months.iter().copied().collect();
+        let mut is_monthly_cadence = false;
+
+        if months_vec.len() >= 3 {
+            let mut diffs: Vec<i32> = Vec::new();
+            for w in months_vec.windows(2) {
+                let (y1, m1) = w[0];
+                let (y2, m2) = w[1];
+                let diff = (y2 - y1) * 12 + (m2 as i32 - m1 as i32);
+                if diff > 0 {
+                    diffs.push(diff);
+                }
+            }
+
+            if !diffs.is_empty() {
+                diffs.sort_unstable();
+                let median_diff = diffs[diffs.len() / 2];
+                // Monthly cadence: median spacing between statements is 1 (or 2 during minor gaps)
+                // If median spacing is >= 3, it's quarterly, semi-annual, or annual.
+                if median_diff <= 2 {
+                    is_monthly_cadence = true;
+                }
+            }
+        }
+
+        // Only analyze monthly gaps for institutions exhibiting a regular monthly cadence
+        if is_monthly_cadence && present_months.len() >= 3 {
             let (first_year, first_month) = *present_months.iter().next().unwrap();
             let (last_year, last_month) = *present_months.iter().next_back().unwrap();
 
@@ -259,7 +305,7 @@ pub fn detect_statement_anomalies(statements: &[StatementMetadata]) -> Vec<State
                 }
             }
 
-            // Flush trailing missing run if interval ended before last month (should be handled, but safe)
+            // Flush trailing missing run if interval ended before last month
             if !missing_run.is_empty() {
                 let start_date = format!("{}-01", missing_run[0]);
                 let end_date = format!("{}-01", missing_run.last().unwrap());
@@ -564,6 +610,101 @@ mod tests {
             .unwrap();
         assert_eq!(gap.kind, AnomalyKind::MissingInterval);
         assert_eq!(gap.missing_periods, vec!["2026-02".to_string()]);
+    }
+
+    #[test]
+    fn test_annual_cadence_does_not_emit_monthly_gaps() {
+        let stmts = vec![
+            StatementMetadata {
+                filename: "Tax Returns 2023-04-15.pdf".to_string(),
+                path: "".to_string(),
+                relative_path: "".to_string(),
+                folder: "".to_string(),
+                institution: "Tax Returns".to_string(),
+                date: Some("2023-04-15".to_string()),
+                disambiguation: None,
+                is_canonical: true,
+                size_bytes: 5000,
+                modified_ms: None,
+            },
+            StatementMetadata {
+                filename: "Tax Returns 2024-04-15.pdf".to_string(),
+                path: "".to_string(),
+                relative_path: "".to_string(),
+                folder: "".to_string(),
+                institution: "Tax Returns".to_string(),
+                date: Some("2024-04-15".to_string()),
+                disambiguation: None,
+                is_canonical: true,
+                size_bytes: 5000,
+                modified_ms: None,
+            },
+            StatementMetadata {
+                filename: "Tax Returns 2025-04-15.pdf".to_string(),
+                path: "".to_string(),
+                relative_path: "".to_string(),
+                folder: "".to_string(),
+                institution: "Tax Returns".to_string(),
+                date: Some("2025-04-15".to_string()),
+                disambiguation: None,
+                is_canonical: true,
+                size_bytes: 5000,
+                modified_ms: None,
+            },
+        ];
+
+        let anomalies = detect_statement_anomalies(&stmts);
+        // Annual accounts should NOT have monthly missing intervals
+        let missing_intervals: Vec<_> = anomalies
+            .into_iter()
+            .filter(|a| a.kind == AnomalyKind::MissingInterval)
+            .collect();
+        assert!(missing_intervals.is_empty());
+    }
+
+    #[test]
+    fn test_pairwise_exact_duplicate_detection() {
+        let temp_dir = std::env::temp_dir().join("navis_recon_test_dups");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let path1 = temp_dir.join("file1.pdf");
+        let path2 = temp_dir.join("file2.pdf");
+        fs::write(&path1, b"identical content").unwrap();
+        fs::write(&path2, b"identical content").unwrap();
+
+        let stmts = vec![
+            StatementMetadata {
+                filename: "Discover 2026-01-04.pdf".to_string(),
+                path: path1.to_string_lossy().to_string(),
+                relative_path: "".to_string(),
+                folder: "".to_string(),
+                institution: "Discover".to_string(),
+                date: Some("2026-01-04".to_string()),
+                disambiguation: None,
+                is_canonical: true,
+                size_bytes: 17,
+                modified_ms: None,
+            },
+            StatementMetadata {
+                filename: "Discover 2026-01-04 copy.pdf".to_string(),
+                path: path2.to_string_lossy().to_string(),
+                relative_path: "".to_string(),
+                folder: "".to_string(),
+                institution: "Discover".to_string(),
+                date: Some("2026-01-04".to_string()),
+                disambiguation: None,
+                is_canonical: false,
+                size_bytes: 17,
+                modified_ms: None,
+            },
+        ];
+
+        let anomalies = detect_statement_anomalies(&stmts);
+        assert_eq!(anomalies.len(), 1);
+        assert_eq!(anomalies[0].kind, AnomalyKind::ExactDuplicate);
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
