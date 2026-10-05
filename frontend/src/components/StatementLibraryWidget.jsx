@@ -1,19 +1,21 @@
 import { useState, useEffect, useMemo } from 'react';
-import { getStatementCatalog, openStatementFile, getVaultChecklist } from '../services/apiClient';
+import { getStatementCatalog, openStatementFile, getVaultChecklist, saveVaultChecklist } from '../services/apiClient';
+import { findBestInstitutionMatch } from '../utils/institutionMatching';
 
-export default function StatementLibraryWidget() {
+export default function StatementLibraryWidget({ initialFilter = null, onNavigateToChecklist = null }) {
   const [catalog, setCatalog] = useState(null);
   const [checklist, setChecklist] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [openingPath, setOpeningPath] = useState(null);
   const [openError, setOpenError] = useState(null);
+  const [reconcilingPath, setReconcilingPath] = useState(null);
 
   // Filters
-  const [searchTerm, setSearchTerm] = useState('');
-  const [selectedInstitution, setSelectedInstitution] = useState('ALL');
-  const [selectedYear, setSelectedYear] = useState('ALL');
-  const [selectedStatus, setSelectedStatus] = useState('ALL'); // ALL, CANONICAL, NON_CANONICAL, UNREVIEWED, ANOMALY
+  const [searchTerm, setSearchTerm] = useState(initialFilter?.search || '');
+  const [selectedInstitution, setSelectedInstitution] = useState(initialFilter?.institution || 'ALL');
+  const [selectedYear, setSelectedYear] = useState(initialFilter?.year || 'ALL');
+  const [selectedStatus, setSelectedStatus] = useState(initialFilter?.status || 'ALL'); // ALL, CANONICAL, NON_CANONICAL, UNREVIEWED, ANOMALY
 
   async function loadData() {
     setLoading(true);
@@ -44,6 +46,18 @@ export default function StatementLibraryWidget() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadData();
   }, []);
+
+  useEffect(() => {
+    if (initialFilter) {
+      // Synchronize parent navigation filter props into interactive widget filter state
+      /* eslint-disable react-hooks/set-state-in-effect */
+      if (initialFilter.search !== undefined) setSearchTerm(initialFilter.search);
+      if (initialFilter.institution !== undefined) setSelectedInstitution(initialFilter.institution);
+      if (initialFilter.year !== undefined) setSelectedYear(initialFilter.year);
+      if (initialFilter.status !== undefined) setSelectedStatus(initialFilter.status);
+      /* eslint-enable react-hooks/set-state-in-effect */
+    }
+  }, [initialFilter]);
 
   const handleOpenStatement = async (statement) => {
     setOpeningPath(statement.path);
@@ -92,31 +106,61 @@ export default function StatementLibraryWidget() {
     return set;
   }, [catalog]);
 
-  // Helper to determine whether a statement is considered unreviewed in VaultChecklist
-  const isStatementUnreviewed = (stmt) => {
+  // Helper to determine checklist item & review status for a statement
+  const getStatementChecklistStatus = (stmt) => {
     if (!checklist?.statements || !stmt.date || stmt.date.length < 7) {
-      return false; // Can't determine or checklist not available
+      return null;
     }
     const stmtYear = stmt.date.slice(0, 4);
-    // If checklist year matches
     if (checklist.year && String(checklist.year) !== stmtYear) {
-      return false;
+      return null;
     }
     const monthNum = parseInt(stmt.date.slice(5, 7), 10);
     if (isNaN(monthNum) || monthNum < 1 || monthNum > 12) {
-      return false;
+      return null;
     }
     const monthIndex = monthNum - 1;
 
-    // Check if the institution in checklist is unchecked for that month
-    const instEntry = checklist.statements.find(item =>
-      item.institution.toLowerCase().trim() === stmt.institution.toLowerCase().trim()
-    );
-    if (!instEntry || !Array.isArray(instEntry.months)) {
-      return false;
+    const candidateNames = checklist.statements.map(s => s.institution);
+    const matchedInst = findBestInstitutionMatch(stmt.institution, candidateNames);
+    if (!matchedInst) return null;
+
+    const instIndex = checklist.statements.findIndex(s => s.institution === matchedInst);
+    if (instIndex === -1) return null;
+
+    const instEntry = checklist.statements[instIndex];
+    const isReviewed = Boolean(instEntry.months?.[monthIndex]);
+
+    return {
+      instIndex,
+      monthIndex,
+      institution: matchedInst,
+      isReviewed,
+    };
+  };
+
+  const isStatementUnreviewed = (stmt) => {
+    const status = getStatementChecklistStatus(stmt);
+    return status ? !status.isReviewed : false;
+  };
+
+  const handleToggleReconcile = async (stmt) => {
+    const status = getStatementChecklistStatus(stmt);
+    if (!status || !checklist) return;
+
+    setReconcilingPath(stmt.path);
+    try {
+      const newChecklist = structuredClone(checklist);
+      const current = Boolean(newChecklist.statements[status.instIndex].months[status.monthIndex]);
+      newChecklist.statements[status.instIndex].months[status.monthIndex] = !current;
+      setChecklist(newChecklist);
+      await saveVaultChecklist(newChecklist);
+    } catch (err) {
+      console.error("Failed to toggle reconciliation status:", err);
+      setOpenError(`Failed to update checklist: ${err?.message || String(err)}`);
+    } finally {
+      setReconcilingPath(null);
     }
-    // Completed is true, so unreviewed is when completed is false
-    return instEntry.months[monthIndex] === false;
   };
 
   // Filtered statements list
@@ -537,14 +581,47 @@ export default function StatementLibraryWidget() {
 
                       {/* Action */}
                       <td className="py-3 px-4 text-center whitespace-nowrap">
-                        <button
-                          type="button"
-                          onClick={() => handleOpenStatement(stmt)}
-                          disabled={isOpening}
-                          className="px-2.5 py-1 bg-cyan-500/10 hover:bg-cyan-500/20 active:bg-cyan-500/30 text-cyan-300 border border-cyan-500/30 hover:border-cyan-400 rounded text-[11px] font-bold uppercase tracking-wider transition-all disabled:opacity-50"
-                        >
-                          {isOpening ? 'Opening...' : 'View PDF'}
-                        </button>
+                        <div className="flex items-center justify-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenStatement(stmt)}
+                            disabled={isOpening}
+                            className="px-2.5 py-1 bg-cyan-500/10 hover:bg-cyan-500/20 active:bg-cyan-500/30 text-cyan-300 border border-cyan-500/30 hover:border-cyan-400 rounded text-[11px] font-bold uppercase tracking-wider transition-all disabled:opacity-50"
+                            title="Open Statement PDF in default system viewer"
+                          >
+                            {isOpening ? 'Opening...' : 'View PDF'}
+                          </button>
+                          {(() => {
+                            const checkStatus = getStatementChecklistStatus(stmt);
+                            if (!checkStatus) return null;
+                            const isReconciling = reconcilingPath === stmt.path;
+                            return (
+                              <button
+                                type="button"
+                                onClick={() => handleToggleReconcile(stmt)}
+                                disabled={isReconciling}
+                                title={checkStatus.isReviewed ? "Mark Unreconciled in Checklist" : "Mark Reconciled in Checklist"}
+                                className={`px-2 py-1 rounded text-[11px] font-bold uppercase tracking-wider border transition-all disabled:opacity-50 ${
+                                  checkStatus.isReviewed
+                                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30'
+                                    : 'bg-white/5 text-white/50 border-white/10 hover:border-emerald-400 hover:text-emerald-400'
+                                }`}
+                              >
+                                {isReconciling ? '...' : (checkStatus.isReviewed ? '✓ Reconciled' : 'Reconcile')}
+                              </button>
+                            );
+                          })()}
+                          {onNavigateToChecklist && (
+                            <button
+                              type="button"
+                              onClick={onNavigateToChecklist}
+                              title="Jump to Master Checklist"
+                              className="px-1.5 py-1 text-white/40 hover:text-cyan-400 hover:bg-white/5 rounded border border-transparent hover:border-white/10 text-[11px] transition-all"
+                            >
+                              ⚖️
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );

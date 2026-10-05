@@ -13,6 +13,16 @@ function App() {
   const [currentView, setCurrentView] = useState('overview');
   const [pendingCount, setPendingCount] = useState(0);
   const [desktopStatus, setDesktopStatus] = useState('checking');
+  const [statementFilter, setStatementFilter] = useState(null);
+
+  const navigateToStatements = (filters = {}) => {
+    setStatementFilter(filters);
+    setCurrentView('statements');
+  };
+
+  const navigateToChecklist = () => {
+    setCurrentView('checklist');
+  };
 
   useEffect(() => {
     let isMounted = true;
@@ -126,13 +136,18 @@ function App() {
 
           {currentView === 'statements' && (
             <div className="h-full">
-              <StatementLibraryWidget />
+              <StatementLibraryWidget 
+                initialFilter={statementFilter} 
+                onNavigateToChecklist={navigateToChecklist} 
+              />
             </div>
           )}
 
           {currentView === 'checklist' && (
             <div className="bg-zinc-900/50 rounded-lg border border-white/5 shadow-2xl h-full">
-              <VaultChecklist />
+              <VaultChecklist 
+                onNavigateToStatements={navigateToStatements} 
+              />
             </div>
           )}
 
