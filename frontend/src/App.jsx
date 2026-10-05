@@ -13,23 +13,35 @@ function App() {
   const [pendingCount, setPendingCount] = useState(0);
   const [desktopStatus, setDesktopStatus] = useState('checking');
 
-  async function fetchPendingCount() {
-    try {
-      const data = await request('/api/ledger/pending');
-      setPendingCount(data.length);
-    } catch (e) {
-      console.error(e);
-    }
-  }
-
   useEffect(() => {
+    let isMounted = true;
+
     ping()
-      .then(() => setDesktopStatus('online'))
-      .catch(() => setDesktopStatus('offline'))
-    fetchPendingCount();
+      .then(() => {
+        if (isMounted) setDesktopStatus('online');
+      })
+      .catch(() => {
+        if (isMounted) setDesktopStatus('offline');
+      });
+
+    const updatePendingCount = async () => {
+      try {
+        const data = await request('/api/ledger/pending');
+        if (isMounted) {
+          setPendingCount(data.length);
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    };
+
+    updatePendingCount();
     // Refresh count every 10 seconds to keep sidebar accurate
-    const interval = setInterval(fetchPendingCount, 10000);
-    return () => clearInterval(interval);
+    const interval = setInterval(updatePendingCount, 10000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
   }, []);
 
   const navButton = (viewId, icon, label) => {
