@@ -7,13 +7,15 @@ import StatementLibraryWidget from './components/StatementLibraryWidget'
 import SubscriptionsWidget from './components/SubscriptionsWidget'
 import SyncWidget from './components/SyncWidget'
 import WealthDashboardWidget from './components/WealthDashboardWidget'
-import { ping, request, getRecurringObligations } from './services/apiClient'
+import RecordsWidget from './components/RecordsWidget'
+import { ping, request, getRecurringObligations, getRecordsRadar } from './services/apiClient'
 import './index.css'
 
 function App() {
   const [currentView, setCurrentView] = useState('overview');
   const [pendingCount, setPendingCount] = useState(0);
   const [alertObligationsCount, setAlertObligationsCount] = useState(0);
+  const [recordsActionCount, setRecordsActionCount] = useState(0);
   const [desktopStatus, setDesktopStatus] = useState('checking');
   const [statementFilter, setStatementFilter] = useState(null);
 
@@ -63,12 +65,25 @@ function App() {
       }
     };
 
+    const updateRecordsRadarCount = async () => {
+      try {
+        const radarReport = await getRecordsRadar();
+        if (isMounted && radarReport?.summary) {
+          setRecordsActionCount(radarReport.summary.actionRequired || 0);
+        }
+      } catch (e) {
+        console.warn('Failed to fetch records radar action count:', e);
+      }
+    };
+
     updatePendingCount();
     updateObligationAlerts();
+    updateRecordsRadarCount();
     // Refresh count every 10 seconds to keep sidebar accurate
     const interval = setInterval(() => {
       updatePendingCount();
       updateObligationAlerts();
+      updateRecordsRadarCount();
     }, 10000);
     return () => {
       isMounted = false;
@@ -112,6 +127,21 @@ function App() {
             {navButton('statements', '📂', 'Statements')}
             {navButton('checklist', '⚖️', 'Checklist')}
             
+            <button 
+              type="button"
+              onClick={() => setCurrentView('records')}
+              className={`w-full flex items-center justify-between p-3 text-sm font-bold uppercase tracking-widest rounded transition-all ${currentView === 'records' ? 'bg-accent/10 text-accent border border-accent/30' : 'text-white/50 hover:bg-white/5 hover:text-white border border-transparent'}`}
+            >
+              <div className="flex items-center gap-3">
+                <span className={currentView === 'records' ? 'text-accent' : 'opacity-70'}>📁</span> Records
+              </div>
+              {recordsActionCount > 0 && (
+                <span className="bg-red-500/20 text-red-400 border border-red-500/50 px-2 py-0.5 rounded text-[10px] animate-pulse">
+                  {recordsActionCount}
+                </span>
+              )}
+            </button>
+
             <button 
               type="button"
               onClick={() => setCurrentView('subscriptions')}
@@ -167,6 +197,12 @@ function App() {
           {currentView === 'reviews' && (
             <div className="bg-zinc-900/50 p-8 rounded-lg border border-white/5 shadow-2xl">
               <LedgerReviewWidget />
+            </div>
+          )}
+
+          {currentView === 'records' && (
+            <div className="h-full">
+              <RecordsWidget />
             </div>
           )}
 

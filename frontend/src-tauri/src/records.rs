@@ -468,6 +468,60 @@ pub fn get_records_radar(as_of_date: Option<String>) -> Result<RecordRadarReport
     Ok(generate_radar_report(&inventory.records, &effective_date))
 }
 
+/// Reveals a record file or directory in the native file explorer.
+/// If `file_path` points to a file, highlights the file in the containing folder.
+/// If it points to a directory, opens that directory.
+#[tauri::command]
+pub fn reveal_record_file(file_path: String) -> Result<(), String> {
+    let p = Path::new(&file_path);
+    if !p.exists() {
+        return Err(format!("Path does not exist: {}", file_path));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let mut cmd = std::process::Command::new("explorer.exe");
+        if p.is_file() {
+            cmd.arg(format!("/select,{}", p.display()));
+        } else {
+            cmd.arg(p.display().to_string());
+        }
+        cmd.creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("Failed to open file explorer: {e}"))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = std::process::Command::new("open");
+        if p.is_file() {
+            cmd.arg("-R").arg(&file_path);
+        } else {
+            cmd.arg(&file_path);
+        }
+        cmd.spawn()
+            .map_err(|e| format!("Failed to open file explorer: {e}"))?;
+        Ok(())
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        let target = if p.is_file() {
+            p.parent().unwrap_or(p)
+        } else {
+            p
+        };
+        std::process::Command::new("xdg-open")
+            .arg(target)
+            .spawn()
+            .map_err(|e| format!("Failed to open file explorer: {e}"))?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -827,5 +881,12 @@ mod tests {
         let res_malformed = get_records_radar(Some("not-a-date".to_string()));
         assert!(res_malformed.is_err());
         assert!(res_malformed.unwrap_err().contains("Invalid as_of_date format"));
+    }
+
+    #[test]
+    fn test_reveal_record_file_nonexistent() {
+        let res = reveal_record_file("C:\\nonexistent_fake_path_12345\\file.pdf".to_string());
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Path does not exist"));
     }
 }
