@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::obligations::{add_days, add_months, current_date_utc, days_between, parse_ymd};
 
+pub const VAULT_ROOT: &str = r"G:\My Drive\Navis-Vault";
 pub const INVENTORY_PATH: &str = r"G:\My Drive\Navis-Vault\Records\inventory.json";
 
 /// Core schema representing a single indexed household record.
@@ -468,6 +469,91 @@ pub fn get_records_radar(as_of_date: Option<String>) -> Result<RecordRadarReport
     Ok(generate_radar_report(&inventory.records, &effective_date))
 }
 
+/// Resolves a candidate path against the Vault root if it is relative or not found.
+pub fn resolve_record_path(file_path: &str) -> PathBuf {
+    let p = Path::new(file_path);
+    if p.is_absolute() && p.exists() {
+        return p.to_path_buf();
+    }
+
+    let vault_base = Path::new(VAULT_ROOT);
+    let trimmed = file_path.trim_start_matches(['/', '\\']);
+
+    // Check directly relative to vault root
+    let direct_vault = vault_base.join(trimmed);
+    if direct_vault.exists() {
+        return direct_vault;
+    }
+
+    // Check relative to vault Records folder
+    let records_vault = vault_base.join("Records").join(trimmed);
+    if records_vault.exists() {
+        return records_vault;
+    }
+
+    // If still not found, return the absolute path if it was absolute, else direct_vault
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        direct_vault
+    }
+}
+
+/// Reveals a record file or directory in the native file explorer.
+/// If `file_path` points to a file, highlights the file in the containing folder.
+/// If it points to a directory, opens that directory.
+#[tauri::command]
+pub fn reveal_record_file(file_path: String) -> Result<(), String> {
+    let resolved = resolve_record_path(&file_path);
+    if !resolved.exists() {
+        return Err(format!("Path does not exist: {}", file_path));
+    }
+    let p = &resolved;
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let mut cmd = std::process::Command::new("explorer.exe");
+        if p.is_file() {
+            cmd.arg(format!("/select,{}", p.display()));
+        } else {
+            cmd.arg(p.display().to_string());
+        }
+        cmd.creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("Failed to open file explorer: {e}"))?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = std::process::Command::new("open");
+        if p.is_file() {
+            cmd.arg("-R").arg(&file_path);
+        } else {
+            cmd.arg(&file_path);
+        }
+        cmd.spawn()
+            .map_err(|e| format!("Failed to open file explorer: {e}"))?;
+        Ok(())
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        let target = if p.is_file() {
+            p.parent().unwrap_or(p)
+        } else {
+            p
+        };
+        std::process::Command::new("xdg-open")
+            .arg(target)
+            .spawn()
+            .map_err(|e| format!("Failed to open file explorer: {e}"))?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -827,5 +913,28 @@ mod tests {
         let res_malformed = get_records_radar(Some("not-a-date".to_string()));
         assert!(res_malformed.is_err());
         assert!(res_malformed.unwrap_err().contains("Invalid as_of_date format"));
+    }
+
+    #[test]
+    fn test_reveal_record_file_nonexistent() {
+        let res = reveal_record_file("C:\\nonexistent_fake_path_12345\\file.pdf".to_string());
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Path does not exist"));
+    }
+
+    #[test]
+    fn test_resolve_record_path() {
+        let rel_path = "Personal/test_file.pdf";
+        let resolved = resolve_record_path(rel_path);
+        // Should prepend VAULT_ROOT
+        assert!(resolved.to_string_lossy().contains("Navis-Vault"));
+
+        let abs_path = if cfg!(windows) {
+            "C:\\SomeFolder\\file.pdf"
+        } else {
+            "/tmp/file.pdf"
+        };
+        let resolved_abs = resolve_record_path(abs_path);
+        assert_eq!(resolved_abs, PathBuf::from(abs_path));
     }
 }

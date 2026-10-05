@@ -215,4 +215,17 @@ export function getRecordsRadar(asOfDate = null) {
   })
 }
 
+export function revealRecordFile(filePath) {
+  if (isDesktopRuntime()) {
+    return invoke('reveal_record_file', { filePath })
+  }
+  return request('/api/records/reveal', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file_path: filePath }),
+    ipcCommand: 'reveal_record_file',
+    ipcArgs: { filePath },
+  })
+}
+
 export { API_BASE }
