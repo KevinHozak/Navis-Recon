@@ -2,20 +2,20 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
-const LEDGER_PATH: &str = r"G:\My Drive\Navis-Vault\Ledger\Sovereign.beancount";
+pub const LEDGER_PATH: &str = r"G:\My Drive\Navis-Vault\Ledger\Sovereign.beancount";
 
 #[derive(Debug, Clone)]
-struct Posting {
-    account: String,
-    amount: f64,
+pub(crate) struct Posting {
+    pub(crate) account: String,
+    pub(crate) amount: f64,
 }
 
 #[derive(Debug, Clone)]
-struct Transaction {
-    date: String,
-    payee: String,
-    narration: String,
-    postings: Vec<Posting>,
+pub(crate) struct Transaction {
+    pub(crate) date: String,
+    pub(crate) payee: String,
+    pub(crate) narration: String,
+    pub(crate) postings: Vec<Posting>,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,7 +59,7 @@ pub struct LedgerTransaction {
     pub amount: f64,
 }
 
-fn read_ledger() -> Result<String, String> {
+pub(crate) fn read_ledger() -> Result<String, String> {
     let bytes = fs::read(LEDGER_PATH).map_err(|error| format!("failed to read ledger: {error}"))?;
     String::from_utf8(bytes).map_err(|error| format!("ledger is not valid UTF-8: {error}"))
 }
@@ -110,7 +110,7 @@ fn parse_posting(line: &str) -> Option<Posting> {
     })
 }
 
-fn parse_ledger(contents: &str) -> Vec<Transaction> {
+pub(crate) fn parse_ledger(contents: &str) -> Vec<Transaction> {
     let lines: Vec<&str> = contents.lines().collect();
     let mut transactions = Vec::new();
     let mut index = 0;

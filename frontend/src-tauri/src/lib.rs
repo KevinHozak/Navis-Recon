@@ -1,6 +1,7 @@
 mod checklist;
 mod ledger_parser;
 mod ledger_review;
+mod obligations;
 mod statements;
 mod sync;
 
@@ -15,6 +16,7 @@ pub fn run() {
             ledger_parser::get_ledger_summary,
             ledger_parser::get_ledger_history,
             ledger_parser::get_ledger_transactions,
+            obligations::get_recurring_obligations,
             statements::get_statement_catalog,
             statements::open_statement_file,
             sync::start_ledger_sync,
