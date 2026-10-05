@@ -55,6 +55,7 @@ export default function RecordsWidget() {
   const [formFilePath, setFormFilePath] = useState('');
   const [formNotes, setFormNotes] = useState('');
   const [formRecurrenceInterval, setFormRecurrenceInterval] = useState('none');
+  const [customRecurrenceRaw, setCustomRecurrenceRaw] = useState(null);
   const [formLeadTimeDays, setFormLeadTimeDays] = useState('30');
 
   // Delete Confirmation
@@ -158,6 +159,7 @@ export default function RecordsWidget() {
     setFormFilePath('');
     setFormNotes('');
     setFormRecurrenceInterval('none');
+    setCustomRecurrenceRaw(null);
     setFormLeadTimeDays('30');
     setModalError(null);
     setIsModalOpen(true);
@@ -173,13 +175,21 @@ export default function RecordsWidget() {
     setFormNotes(record.notes || '');
 
     if (record.recurrenceRule?.interval) {
-      const interval = typeof record.recurrenceRule.interval === 'string'
-        ? record.recurrenceRule.interval
-        : Object.keys(record.recurrenceRule.interval)[0];
-      setFormRecurrenceInterval(interval || 'none');
+      const rawInt = record.recurrenceRule.interval;
+      if (typeof rawInt === 'string') {
+        setFormRecurrenceInterval(rawInt);
+        setCustomRecurrenceRaw(null);
+      } else if (typeof rawInt === 'object' && rawInt !== null) {
+        setFormRecurrenceInterval('custom');
+        setCustomRecurrenceRaw(rawInt);
+      } else {
+        setFormRecurrenceInterval('none');
+        setCustomRecurrenceRaw(null);
+      }
       setFormLeadTimeDays(String(record.recurrenceRule.leadTimeDays ?? 30));
     } else {
       setFormRecurrenceInterval('none');
+      setCustomRecurrenceRaw(null);
       setFormLeadTimeDays('30');
     }
 
@@ -205,7 +215,19 @@ export default function RecordsWidget() {
     setIsSaving(true);
     setModalError(null);
 
+    // Determine interval payload: if it was custom and kept as custom, retain raw object
+    let finalInterval = null;
+    if (formRecurrenceInterval === 'custom' && customRecurrenceRaw) {
+      finalInterval = customRecurrenceRaw;
+    } else if (formRecurrenceInterval !== 'none') {
+      finalInterval = formRecurrenceInterval;
+    }
+
+    // Preserve unknown/extra fields from existing record
+    const baseRecord = editingRecord ? { ...editingRecord } : {};
+
     const recordPayload = {
+      ...baseRecord,
       id: editingRecord?.id || `rec-${Date.now()}`,
       title: formTitle.trim(),
       category: formCategory.trim(),
@@ -215,9 +237,9 @@ export default function RecordsWidget() {
       notes: formNotes.trim() || null,
       status: editingRecord?.status || 'Active',
       recurrenceRule:
-        formRecurrenceInterval !== 'none'
+        finalInterval !== null
           ? {
-              interval: formRecurrenceInterval,
+              interval: finalInterval,
               leadTimeDays: parseInt(formLeadTimeDays, 10) || 30,
             }
           : null,
@@ -730,9 +752,19 @@ export default function RecordsWidget() {
                   </label>
                   <select
                     value={formRecurrenceInterval}
-                    onChange={(e) => setFormRecurrenceInterval(e.target.value)}
+                    onChange={(e) => {
+                      setFormRecurrenceInterval(e.target.value);
+                      if (e.target.value !== 'custom') {
+                        setCustomRecurrenceRaw(null);
+                      }
+                    }}
                     className="w-full bg-zinc-900 border border-white/10 rounded px-3 py-2 text-xs text-white focus:border-accent outline-none"
                   >
+                    {formRecurrenceInterval === 'custom' && (
+                      <option value="custom">
+                        Custom ({JSON.stringify(customRecurrenceRaw)})
+                      </option>
+                    )}
                     {RECURRENCE_OPTIONS.map((opt) => (
                       <option key={opt.value} value={opt.value}>
                         {opt.label}

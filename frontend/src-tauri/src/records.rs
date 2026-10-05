@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::obligations::{add_days, add_months, current_date_utc, days_between, parse_ymd};
 
+pub const VAULT_ROOT: &str = r"G:\My Drive\Navis-Vault";
 pub const INVENTORY_PATH: &str = r"G:\My Drive\Navis-Vault\Records\inventory.json";
 
 /// Core schema representing a single indexed household record.
@@ -468,15 +469,46 @@ pub fn get_records_radar(as_of_date: Option<String>) -> Result<RecordRadarReport
     Ok(generate_radar_report(&inventory.records, &effective_date))
 }
 
+/// Resolves a candidate path against the Vault root if it is relative or not found.
+pub fn resolve_record_path(file_path: &str) -> PathBuf {
+    let p = Path::new(file_path);
+    if p.is_absolute() && p.exists() {
+        return p.to_path_buf();
+    }
+
+    let vault_base = Path::new(VAULT_ROOT);
+    let trimmed = file_path.trim_start_matches(['/', '\\']);
+
+    // Check directly relative to vault root
+    let direct_vault = vault_base.join(trimmed);
+    if direct_vault.exists() {
+        return direct_vault;
+    }
+
+    // Check relative to vault Records folder
+    let records_vault = vault_base.join("Records").join(trimmed);
+    if records_vault.exists() {
+        return records_vault;
+    }
+
+    // If still not found, return the absolute path if it was absolute, else direct_vault
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        direct_vault
+    }
+}
+
 /// Reveals a record file or directory in the native file explorer.
 /// If `file_path` points to a file, highlights the file in the containing folder.
 /// If it points to a directory, opens that directory.
 #[tauri::command]
 pub fn reveal_record_file(file_path: String) -> Result<(), String> {
-    let p = Path::new(&file_path);
-    if !p.exists() {
+    let resolved = resolve_record_path(&file_path);
+    if !resolved.exists() {
         return Err(format!("Path does not exist: {}", file_path));
     }
+    let p = &resolved;
 
     #[cfg(target_os = "windows")]
     {
@@ -888,5 +920,21 @@ mod tests {
         let res = reveal_record_file("C:\\nonexistent_fake_path_12345\\file.pdf".to_string());
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("Path does not exist"));
+    }
+
+    #[test]
+    fn test_resolve_record_path() {
+        let rel_path = "Personal/test_file.pdf";
+        let resolved = resolve_record_path(rel_path);
+        // Should prepend VAULT_ROOT
+        assert!(resolved.to_string_lossy().contains("Navis-Vault"));
+
+        let abs_path = if cfg!(windows) {
+            "C:\\SomeFolder\\file.pdf"
+        } else {
+            "/tmp/file.pdf"
+        };
+        let resolved_abs = resolve_record_path(abs_path);
+        assert_eq!(resolved_abs, PathBuf::from(abs_path));
     }
 }
