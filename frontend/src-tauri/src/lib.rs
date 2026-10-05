@@ -2,6 +2,7 @@ mod checklist;
 mod ledger_parser;
 mod ledger_review;
 mod obligations;
+mod records;
 mod statements;
 mod sync;
 
@@ -20,6 +21,9 @@ pub fn run() {
             obligations::get_subscription_registry,
             obligations::save_subscription_metadata,
             obligations::save_subscription_registry_payload,
+            records::get_records,
+            records::save_record,
+            records::delete_record,
             statements::get_statement_catalog,
             statements::open_statement_file,
             sync::start_ledger_sync,
