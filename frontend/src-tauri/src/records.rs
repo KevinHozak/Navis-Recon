@@ -169,7 +169,16 @@ pub fn classify_expiration(
 /// Evaluates a single record against an as_of date.
 pub fn evaluate_record_radar(record: &HouseholdRecord, as_of_date: &str) -> RecordRadarItem {
     let (bucket, days) = classify_expiration(record.expiration_date.as_deref(), as_of_date);
-    let is_action_required = matches!(bucket, RecordHealthBucket::Expired | RecordHealthBucket::Critical);
+
+    // If a custom lead time is specified in the recurrence rule, honor it for actionRequired.
+    // Otherwise, default to triggering action on Expired and Critical (<= 30 days).
+    let is_action_required = match (days, &record.recurrence_rule) {
+        (Some(d), Some(rule)) if rule.lead_time_days.is_some() => {
+            let lead_days = rule.lead_time_days.unwrap() as i32;
+            d <= lead_days
+        }
+        _ => matches!(bucket, RecordHealthBucket::Expired | RecordHealthBucket::Critical),
+    };
 
     let next_renewal_date = match (&record.expiration_date, &record.recurrence_rule) {
         (Some(exp), Some(rule)) if !exp.trim().is_empty() => rule.project_next_date(exp.trim()),
@@ -441,8 +450,20 @@ pub fn delete_record(id: String) -> Result<bool, String> {
 pub fn get_records_radar(as_of_date: Option<String>) -> Result<RecordRadarReport, String> {
     let inventory = load_inventory_from_path(&inventory_path())?;
     let effective_date = match as_of_date {
-        Some(ref d) if !d.trim().is_empty() => d.trim().to_string(),
-        _ => current_date_utc(),
+        Some(ref d) => {
+            let trimmed = d.trim();
+            if trimmed.is_empty() {
+                current_date_utc()
+            } else if !is_valid_date_format(trimmed) {
+                return Err(format!(
+                    "Invalid as_of_date format for '{}'. Expected YYYY-MM-DD",
+                    trimmed
+                ));
+            } else {
+                trimmed.to_string()
+            }
+        }
+        None => current_date_utc(),
     };
     Ok(generate_radar_report(&inventory.records, &effective_date))
 }
@@ -733,5 +754,78 @@ mod tests {
         assert_eq!(crit_item.bucket, RecordHealthBucket::Critical);
         assert_eq!(crit_item.next_renewal_date, Some("2031-10-20".to_string()));
         assert!(crit_item.is_action_required);
+    }
+
+    #[test]
+    fn test_lead_time_days_action_required() {
+        let as_of = "2026-10-05";
+
+        // Record expiring in 45 days with a 60-day lead time -> bucket is Upcoming, but action is required
+        let rec_lead_60 = HouseholdRecord {
+            id: "rec-lead-60".to_string(),
+            title: "Car Insurance Renewal".to_string(),
+            category: "Insurance".to_string(),
+            owner: "Kevin".to_string(),
+            expiration_date: Some("2026-11-19".to_string()), // 45 days out
+            file_path: None,
+            notes: None,
+            status: None,
+            recurrence_rule: Some(RecurrenceRule {
+                interval: RecurrenceInterval::Annual,
+                lead_time_days: Some(60),
+            }),
+            extra: BTreeMap::new(),
+        };
+
+        let item = evaluate_record_radar(&rec_lead_60, as_of);
+        assert_eq!(item.bucket, RecordHealthBucket::Upcoming);
+        assert_eq!(item.days_until_expiration, Some(45));
+        assert!(item.is_action_required);
+
+        // Record expiring in 20 days with a 7-day lead time -> bucket is Critical, but action required is suppressed until 7 days
+        let rec_lead_7 = HouseholdRecord {
+            id: "rec-lead-7".to_string(),
+            title: "Short Notice Item".to_string(),
+            category: "Home".to_string(),
+            owner: "Kevin".to_string(),
+            expiration_date: Some("2026-10-25".to_string()), // 20 days out
+            file_path: None,
+            notes: None,
+            status: None,
+            recurrence_rule: Some(RecurrenceRule {
+                interval: RecurrenceInterval::Monthly,
+                lead_time_days: Some(7),
+            }),
+            extra: BTreeMap::new(),
+        };
+
+        let item_7 = evaluate_record_radar(&rec_lead_7, as_of);
+        assert_eq!(item_7.bucket, RecordHealthBucket::Critical);
+        assert_eq!(item_7.days_until_expiration, Some(20));
+        assert!(!item_7.is_action_required); // 20 > 7
+    }
+
+    #[test]
+    fn test_as_of_date_validation() {
+        // Valid date returns Ok
+        let res_valid = get_records_radar(Some("2026-10-05".to_string()));
+        assert!(res_valid.is_ok());
+
+        // Empty string defaults to current date (Ok)
+        let res_empty = get_records_radar(Some("".to_string()));
+        assert!(res_empty.is_ok());
+
+        // None defaults to current date (Ok)
+        let res_none = get_records_radar(None);
+        assert!(res_none.is_ok());
+
+        // Invalid month/date formats return Err
+        let res_invalid_month = get_records_radar(Some("2026-13-01".to_string()));
+        assert!(res_invalid_month.is_err());
+        assert!(res_invalid_month.unwrap_err().contains("Invalid as_of_date format"));
+
+        let res_malformed = get_records_radar(Some("not-a-date".to_string()));
+        assert!(res_malformed.is_err());
+        assert!(res_malformed.unwrap_err().contains("Invalid as_of_date format"));
     }
 }
