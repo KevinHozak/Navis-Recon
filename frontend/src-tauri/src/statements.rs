@@ -24,11 +24,31 @@ pub struct StatementMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AnomalyKind {
+    MissingInterval,
+    ExactDuplicate,
+    DisambiguationCollision,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct StatementAnomaly {
+    pub institution: String,
+    pub kind: AnomalyKind,
+    pub message: String,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub missing_periods: Vec<String>,
+    pub files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct StatementCatalog {
     pub base_path: String,
     pub total_count: usize,
     pub canonical_count: usize,
     pub statements: Vec<StatementMetadata>,
+    pub anomalies: Vec<StatementAnomaly>,
 }
 
 /// Resolves the statement repository base directory.
@@ -110,6 +130,166 @@ pub fn parse_statement_filename(stem: &str) -> (String, Option<String>, Option<S
     }
 }
 
+/// Detects sequence gaps and collisions/duplicates across the given list of statements.
+pub fn detect_statement_anomalies(statements: &[StatementMetadata]) -> Vec<StatementAnomaly> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut anomalies = Vec::new();
+
+    // 1. Group statements by institution
+    let mut by_institution: BTreeMap<&str, Vec<&StatementMetadata>> = BTreeMap::new();
+    for stmt in statements {
+        by_institution
+            .entry(stmt.institution.as_str())
+            .or_default()
+            .push(stmt);
+    }
+
+    for (institution, inst_stmts) in by_institution {
+        // --- A. Collision / Duplicate Detection ---
+        // Group by statement date (if available)
+        let mut by_date: BTreeMap<&str, Vec<&StatementMetadata>> = BTreeMap::new();
+        for stmt in &inst_stmts {
+            if let Some(ref d) = stmt.date {
+                by_date.entry(d.as_str()).or_default().push(stmt);
+            }
+        }
+
+        for (date, date_stmts) in &by_date {
+            if date_stmts.len() > 1 {
+                // Check if any have identical filename/disambiguation or identical size
+                let mut exact_matches = false;
+                let first_filename = &date_stmts[0].filename;
+                let first_size = date_stmts[0].size_bytes;
+
+                for other in &date_stmts[1..] {
+                    if other.filename == *first_filename || other.size_bytes == first_size {
+                        exact_matches = true;
+                        break;
+                    }
+                }
+
+                let (kind, message) = if exact_matches {
+                    (
+                        AnomalyKind::ExactDuplicate,
+                        format!(
+                            "Duplicate statements detected for {} on {}",
+                            institution, date
+                        ),
+                    )
+                } else {
+                    (
+                        AnomalyKind::DisambiguationCollision,
+                        format!(
+                            "Multiple statement files found for {} on {} ({})",
+                            institution,
+                            date,
+                            date_stmts
+                                .iter()
+                                .map(|s| s.filename.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    )
+                };
+
+                anomalies.push(StatementAnomaly {
+                    institution: institution.to_string(),
+                    kind,
+                    message,
+                    start_date: Some(date.to_string()),
+                    end_date: Some(date.to_string()),
+                    missing_periods: Vec::new(),
+                    files: date_stmts.iter().map(|s| s.filename.clone()).collect(),
+                });
+            }
+        }
+
+        // --- B. Sequence Gap (Missing Calendar Months) Detection ---
+        // Extract distinct (year, month) pairs where statements are present
+        let mut present_months: BTreeSet<(i32, u32)> = BTreeSet::new();
+        for stmt in &inst_stmts {
+            if let Some(ref d) = stmt.date {
+                if d.len() >= 7 {
+                    if let (Ok(y), Ok(m)) = (d[0..4].parse::<i32>(), d[5..7].parse::<u32>()) {
+                        if (1..=12).contains(&m) {
+                            present_months.insert((y, m));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Only analyze gaps for institutions with 3 or more statement months spanning at least 3 months
+        if present_months.len() >= 3 {
+            let (first_year, first_month) = *present_months.iter().next().unwrap();
+            let (last_year, last_month) = *present_months.iter().next_back().unwrap();
+
+            let mut cur_year = first_year;
+            let mut cur_month = first_month;
+            let mut missing_run: Vec<String> = Vec::new();
+
+            while (cur_year, cur_month) <= (last_year, last_month) {
+                if !present_months.contains(&(cur_year, cur_month)) {
+                    missing_run.push(format!("{:04}-{:02}", cur_year, cur_month));
+                } else if !missing_run.is_empty() {
+                    let start_date = format!("{}-01", missing_run[0]);
+                    let end_date = format!("{}-01", missing_run.last().unwrap());
+                    anomalies.push(StatementAnomaly {
+                        institution: institution.to_string(),
+                        kind: AnomalyKind::MissingInterval,
+                        message: format!(
+                            "Missing statement period(s) for {}: {}",
+                            institution,
+                            missing_run.join(", ")
+                        ),
+                        start_date: Some(start_date),
+                        end_date: Some(end_date),
+                        missing_periods: missing_run.clone(),
+                        files: Vec::new(),
+                    });
+                    missing_run.clear();
+                }
+
+                // Advance one month
+                cur_month += 1;
+                if cur_month > 12 {
+                    cur_month = 1;
+                    cur_year += 1;
+                }
+            }
+
+            // Flush trailing missing run if interval ended before last month (should be handled, but safe)
+            if !missing_run.is_empty() {
+                let start_date = format!("{}-01", missing_run[0]);
+                let end_date = format!("{}-01", missing_run.last().unwrap());
+                anomalies.push(StatementAnomaly {
+                    institution: institution.to_string(),
+                    kind: AnomalyKind::MissingInterval,
+                    message: format!(
+                        "Missing statement period(s) for {}: {}",
+                        institution,
+                        missing_run.join(", ")
+                    ),
+                    start_date: Some(start_date),
+                    end_date: Some(end_date),
+                    missing_periods: missing_run,
+                    files: Vec::new(),
+                });
+            }
+        }
+    }
+
+    // Sort anomalies: missing intervals first, then by institution and start date
+    anomalies.sort_by(|a, b| {
+        a.institution
+            .cmp(&b.institution)
+            .then_with(|| a.start_date.cmp(&b.start_date))
+    });
+
+    anomalies
+}
+
 /// Recursively scans the target directory strictly read-only for PDF statements.
 pub fn scan_statement_directory(base_dir: &Path) -> StatementCatalog {
     let mut statements = Vec::new();
@@ -128,12 +308,14 @@ pub fn scan_statement_directory(base_dir: &Path) -> StatementCatalog {
 
     let canonical_count = statements.iter().filter(|s| s.is_canonical).count();
     let total_count = statements.len();
+    let anomalies = detect_statement_anomalies(&statements);
 
     StatementCatalog {
         base_path: base_dir.to_string_lossy().to_string(),
         total_count,
         canonical_count,
         statements,
+        anomalies,
     }
 }
 
@@ -297,6 +479,94 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_statement_anomalies_gaps_and_duplicates() {
+        let stmts = vec![
+            StatementMetadata {
+                filename: "Chase Freedom 2026-01-15.pdf".to_string(),
+                path: "".to_string(),
+                relative_path: "".to_string(),
+                folder: "".to_string(),
+                institution: "Chase Freedom".to_string(),
+                date: Some("2026-01-15".to_string()),
+                disambiguation: None,
+                is_canonical: true,
+                size_bytes: 1000,
+                modified_ms: None,
+            },
+            // Missing 2026-02
+            StatementMetadata {
+                filename: "Chase Freedom 2026-03-15.pdf".to_string(),
+                path: "".to_string(),
+                relative_path: "".to_string(),
+                folder: "".to_string(),
+                institution: "Chase Freedom".to_string(),
+                date: Some("2026-03-15".to_string()),
+                disambiguation: None,
+                is_canonical: true,
+                size_bytes: 1000,
+                modified_ms: None,
+            },
+            StatementMetadata {
+                filename: "Chase Freedom 2026-04-15.pdf".to_string(),
+                path: "".to_string(),
+                relative_path: "".to_string(),
+                folder: "".to_string(),
+                institution: "Chase Freedom".to_string(),
+                date: Some("2026-04-15".to_string()),
+                disambiguation: None,
+                is_canonical: true,
+                size_bytes: 1000,
+                modified_ms: None,
+            },
+            // Duplicate files on same date
+            StatementMetadata {
+                filename: "Capital One Venture 2026-01-24.pdf".to_string(),
+                path: "".to_string(),
+                relative_path: "".to_string(),
+                folder: "".to_string(),
+                institution: "Capital One Venture".to_string(),
+                date: Some("2026-01-24".to_string()),
+                disambiguation: None,
+                is_canonical: true,
+                size_bytes: 2048,
+                modified_ms: None,
+            },
+            StatementMetadata {
+                filename: "Capital One Venture 2026-01-24 B.pdf".to_string(),
+                path: "".to_string(),
+                relative_path: "".to_string(),
+                folder: "".to_string(),
+                institution: "Capital One Venture".to_string(),
+                date: Some("2026-01-24".to_string()),
+                disambiguation: Some("B".to_string()),
+                is_canonical: false,
+                size_bytes: 3000,
+                modified_ms: None,
+            },
+        ];
+
+        let anomalies = detect_statement_anomalies(&stmts);
+        assert_eq!(anomalies.len(), 2);
+
+        // Anomaly 1: Capital One Venture disambiguation collision
+        let collision = anomalies
+            .iter()
+            .find(|a| a.institution == "Capital One Venture")
+            .unwrap();
+        assert_eq!(collision.kind, AnomalyKind::DisambiguationCollision);
+        assert_eq!(collision.start_date, Some("2026-01-24".to_string()));
+        assert_eq!(collision.files.len(), 2);
+
+        // Anomaly 2: Chase Freedom missing Feb 2026
+        let gap = anomalies
+            .iter()
+            .find(|a| a.institution == "Chase Freedom")
+            .unwrap();
+        assert_eq!(gap.kind, AnomalyKind::MissingInterval);
+        assert_eq!(gap.missing_periods, vec!["2026-02".to_string()]);
+    }
+
+    #[test]
     #[ignore = "requires mounted Google Drive path; run explicitly with -- --ignored"]
     fn test_live_directory_scan_benchmark() {
         let base_dir = resolve_statements_base_dir();
@@ -309,14 +579,14 @@ mod tests {
         let elapsed = start.elapsed();
 
         println!(
-            "Scanned {} statements ({} canonical) from {:?} in {:?}",
+            "Scanned {} statements ({} canonical, {} anomalies) from {:?} in {:?}",
             catalog.total_count,
             catalog.canonical_count,
+            catalog.anomalies.len(),
             base_dir,
             elapsed
         );
 
-        // Verification of acceptance criteria: returns all statements in milliseconds
         assert!(elapsed.as_secs() < 2, "Scanning should complete within seconds");
     }
 }
