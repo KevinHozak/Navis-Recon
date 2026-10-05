@@ -207,6 +207,16 @@ pub fn add_days(date_str: &str, days: i32) -> Option<String> {
     Some(format!("{:04}-{:02}-{:02}", ny, nm, nd))
 }
 
+/// Returns the current date in YYYY-MM-DD format (UTC).
+pub fn current_date_utc() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let days = (now.as_secs() / 86400) as i32;
+    let (y, m, d) = from_days(days);
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
 /// Adds an offset of calendar months to a date string formatted as YYYY-MM-DD,
 /// clamping days to the end of month if the target month has fewer days.
 pub fn add_months(date_str: &str, months: i32) -> Option<String> {
@@ -635,11 +645,16 @@ pub fn analyze_recurring_obligations_with_registry(
 pub fn get_recurring_obligations() -> Result<Vec<RecurringObligation>, String> {
     let ledger_content = read_ledger()?;
     let transactions = parse_ledger(&ledger_content);
-    let registry = load_subscription_registry(Path::new(SUBSCRIPTIONS_PATH))
-        .unwrap_or_else(|_| SubscriptionRegistryPayload::default());
+    let path = Path::new(SUBSCRIPTIONS_PATH);
+    let registry = if path.exists() {
+        load_subscription_registry(path)?
+    } else {
+        SubscriptionRegistryPayload::default()
+    };
+    let today = current_date_utc();
     Ok(analyze_recurring_obligations_with_registry(
         &transactions,
-        None,
+        Some(&today),
         &registry,
     ))
 }
@@ -654,7 +669,11 @@ pub fn get_subscription_registry() -> Result<SubscriptionRegistryPayload, String
 #[tauri::command]
 pub fn save_subscription_metadata(metadata: SubscriptionMetadata) -> Result<(), String> {
     let path = Path::new(SUBSCRIPTIONS_PATH);
-    let mut payload = load_subscription_registry(path).unwrap_or_default();
+    let mut payload = if path.exists() {
+        load_subscription_registry(path)?
+    } else {
+        SubscriptionRegistryPayload::default()
+    };
 
     // Normalize metadata key if blank
     let mut entry = metadata;
@@ -1030,6 +1049,18 @@ mod tests {
             loaded.subscriptions[0].cancellation_url,
             Some("https://test.com/cancel".to_string())
         );
+
+        let _ = fs::remove_file(&test_file);
+    }
+
+    #[test]
+    fn test_registry_corrupted_file_error_propagated() {
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_subscriptions_corrupted.json");
+        fs::write(&test_file, b"{\"subscriptions\": [ invalid json ").unwrap();
+
+        let result = load_subscription_registry(&test_file);
+        assert!(result.is_err(), "Corrupted registry should return Err, not default");
 
         let _ = fs::remove_file(&test_file);
     }
