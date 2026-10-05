@@ -71,6 +71,10 @@ export default function SubscriptionsWidget() {
     const curMonthPrefix = `${curYear}-${String(curMonth).padStart(2, '0')}`;
     const nextMonthPrefix = `${nextYear}-${String(nextMonth).padStart(2, '0')}`;
 
+    // Target horizon: end of next month
+    const nextMonthDays = new Date(nextYear, nextMonth, 0).getDate();
+    const horizonEndDateStr = `${nextYear}-${String(nextMonth).padStart(2, '0')}-${String(nextMonthDays).padStart(2, '0')}`;
+
     let monthlyRunRate = 0;
     let currentMonthDue = 0;
     let nextMonthDue = 0;
@@ -78,6 +82,57 @@ export default function SubscriptionsWidget() {
     let priceHikesCount = 0;
     let activeTrialsCount = 0;
     const accountSet = new Set();
+
+    // Helper to step a date forward by cadence
+    const stepNextDate = (dStr, cad) => {
+      const parts = dStr.split('-');
+      if (parts.length < 3) return null;
+      const y = parseInt(parts[0], 10);
+      const m = parseInt(parts[1], 10);
+      const d = parseInt(parts[2], 10);
+
+      if (cad === 'weekly') {
+        const dt = new Date(Date.UTC(y, m - 1, d));
+        dt.setUTCDate(dt.getUTCDate() + 7);
+        return dt.toISOString().slice(0, 10);
+      }
+      if (cad === 'biweekly') {
+        const dt = new Date(Date.UTC(y, m - 1, d));
+        dt.setUTCDate(dt.getUTCDate() + 14);
+        return dt.toISOString().slice(0, 10);
+      }
+      if (cad === 'monthly') {
+        const totalM = (y * 12 + (m - 1)) + 1;
+        const ny = Math.floor(totalM / 12);
+        const nm = (totalM % 12) + 1;
+        const maxD = new Date(ny, nm, 0).getDate();
+        const nd = Math.min(d, maxD);
+        return `${ny}-${String(nm).padStart(2, '0')}-${String(nd).padStart(2, '0')}`;
+      }
+      if (cad === 'quarterly') {
+        const totalM = (y * 12 + (m - 1)) + 3;
+        const ny = Math.floor(totalM / 12);
+        const nm = (totalM % 12) + 1;
+        const maxD = new Date(ny, nm, 0).getDate();
+        const nd = Math.min(d, maxD);
+        return `${ny}-${String(nm).padStart(2, '0')}-${String(nd).padStart(2, '0')}`;
+      }
+      if (cad === 'semi_annual') {
+        const totalM = (y * 12 + (m - 1)) + 6;
+        const ny = Math.floor(totalM / 12);
+        const nm = (totalM % 12) + 1;
+        const maxD = new Date(ny, nm, 0).getDate();
+        const nd = Math.min(d, maxD);
+        return `${ny}-${String(nm).padStart(2, '0')}-${String(nd).padStart(2, '0')}`;
+      }
+      if (cad === 'annual') {
+        const ny = y + 1;
+        const maxD = new Date(ny, m, 0).getDate();
+        const nd = Math.min(d, maxD);
+        return `${ny}-${String(m).padStart(2, '0')}-${String(nd).padStart(2, '0')}`;
+      }
+      return null;
+    };
 
     for (const ob of obligations) {
       if (ob.account) accountSet.add(ob.account);
@@ -108,22 +163,30 @@ export default function SubscriptionsWidget() {
           break;
       }
 
-      // Check due dates
-      if (ob.next_projected_date) {
-        if (ob.next_projected_date.startsWith(curMonthPrefix)) {
-          currentMonthDue += ob.latest_amount || amt;
-        } else if (ob.next_projected_date.startsWith(nextMonthPrefix)) {
-          nextMonthDue += ob.latest_amount || amt;
+      // Project all occurrences falling within current month and next month
+      let projDate = ob.next_projected_date;
+      let iterations = 0;
+      const chargeAmt = ob.latest_amount || amt;
+
+      while (projDate && projDate <= horizonEndDateStr && iterations < 12) {
+        iterations += 1;
+        if (projDate.startsWith(curMonthPrefix)) {
+          currentMonthDue += chargeAmt;
+        } else if (projDate.startsWith(nextMonthPrefix)) {
+          nextMonthDue += chargeAmt;
         }
+        projDate = stepNextDate(projDate, ob.cadence);
       }
 
+      // Count alerts
       if (ob.alerts && ob.alerts.length > 0) {
         alertsCount += ob.alerts.length;
         for (const al of ob.alerts) {
           if (al.kind === 'price_hike') priceHikesCount += 1;
-          if (al.kind === 'trial_expiring') activeTrialsCount += 1;
         }
       }
+
+      // Count trial once (from metadata directly)
       if (ob.metadata?.is_trial) {
         activeTrialsCount += 1;
       }
@@ -190,7 +253,7 @@ export default function SubscriptionsWidget() {
     setEditTrialEndDate(ob.metadata?.trial_end_date || '');
     setEditAlertLeadDays(ob.metadata?.alert_lead_days ? String(ob.metadata.alert_lead_days) : '14');
     setEditCustomLabel(ob.metadata?.custom_label || '');
-    setEditIsReviewed(Boolean(ob.metadata?.extra?.reviewed));
+    setEditIsReviewed(Boolean(ob.metadata?.reviewed ?? ob.metadata?.extra?.reviewed));
   };
 
   // Close Edit Drawer
@@ -237,10 +300,7 @@ export default function SubscriptionsWidget() {
               metadata: {
                 ...item.metadata,
                 ...newMetadata,
-                extra: {
-                  ...(item.metadata?.extra || {}),
-                  reviewed: editIsReviewed,
-                },
+                reviewed: editIsReviewed,
               },
             };
           }
@@ -260,7 +320,7 @@ export default function SubscriptionsWidget() {
 
   // Quick toggle review status without opening full modal
   const handleToggleReviewed = async (ob) => {
-    const currentReviewed = Boolean(ob.metadata?.extra?.reviewed);
+    const currentReviewed = Boolean(ob.metadata?.reviewed ?? ob.metadata?.extra?.reviewed);
     const updatedMetadata = {
       ...(ob.metadata || {
         key: ob.key,
@@ -280,10 +340,7 @@ export default function SubscriptionsWidget() {
               metadata: {
                 ...item.metadata,
                 ...updatedMetadata,
-                extra: {
-                  ...(item.metadata?.extra || {}),
-                  reviewed: !currentReviewed,
-                },
+                reviewed: !currentReviewed,
               },
             };
           }
@@ -413,7 +470,7 @@ export default function SubscriptionsWidget() {
           <div className="mt-3 text-xs text-white/50 flex items-center justify-between border-t border-white/5 pt-2">
             <span>Review Coverage</span>
             <span className="font-mono font-bold text-white/80">
-              {obligations.filter((o) => o.metadata?.extra?.reviewed).length} / {obligations.length}
+              {obligations.filter((o) => o.metadata?.reviewed ?? o.metadata?.extra?.reviewed).length} / {obligations.length}
             </span>
           </div>
         </div>
@@ -521,7 +578,7 @@ export default function SubscriptionsWidget() {
               <tbody className="divide-y divide-white/5 text-sm">
                 {filteredObligations.map((ob) => {
                   const hasAlerts = ob.alerts && ob.alerts.length > 0;
-                  const isReviewed = Boolean(ob.metadata?.extra?.reviewed);
+                  const isReviewed = Boolean(ob.metadata?.reviewed ?? ob.metadata?.extra?.reviewed);
                   const priceDelta = ob.price_delta;
 
                   return (
