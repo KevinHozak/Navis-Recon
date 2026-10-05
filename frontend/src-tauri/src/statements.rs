@@ -297,6 +297,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires mounted Google Drive path; run explicitly with -- --ignored"]
     fn test_live_directory_scan_benchmark() {
         let base_dir = resolve_statements_base_dir();
         if !base_dir.exists() {
