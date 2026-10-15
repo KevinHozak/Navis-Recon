@@ -4,8 +4,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-const CHECKLIST_PATH: &str = r"G:\My Drive\Navis-Vault\Ledger\checklist.json";
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChecklistPayload {
     pub year: Value,
@@ -118,7 +116,7 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), String> {
 
 #[tauri::command]
 pub fn get_vault_checklist() -> Result<ChecklistPayload, String> {
-    let json = read_utf8_sig(Path::new(CHECKLIST_PATH))?;
+    let json = read_utf8_sig(Path::new(crate::config::get("checklist_path")))?;
     serde_json::from_str(&json).map_err(|error| format!("failed to parse checklist: {error}"))
 }
 
@@ -126,5 +124,5 @@ pub fn get_vault_checklist() -> Result<ChecklistPayload, String> {
 pub fn save_vault_checklist(payload: ChecklistPayload) -> Result<(), String> {
     let json = serde_json::to_vec_pretty(&payload)
         .map_err(|error| format!("failed to serialize checklist: {error}"))?;
-    write_atomic(Path::new(CHECKLIST_PATH), &json)
+    write_atomic(Path::new(crate::config::get("checklist_path")), &json)
 }

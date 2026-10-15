@@ -6,9 +6,6 @@ use std::path::{Path, PathBuf};
 
 use crate::obligations::{add_days, add_months, current_date_utc, days_between, parse_ymd};
 
-pub const VAULT_ROOT: &str = r"G:\My Drive\Navis-Vault";
-pub const INVENTORY_PATH: &str = r"G:\My Drive\Navis-Vault\Records\inventory.json";
-
 /// Core schema representing a single indexed household record.
 /// Follows "index before storage" rule: pointers to file locations rather than duplicate storage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -39,9 +36,9 @@ pub enum RecurrenceInterval {
     Quarterly,
     SemiAnnual,
     Annual,
-    Biennial,      // Every 2 years
-    FiveYear,      // Every 5 years
-    TenYear,       // Every 10 years (e.g. US Adult Passport)
+    Biennial, // Every 2 years
+    FiveYear, // Every 5 years
+    TenYear,  // Every 10 years (e.g. US Adult Passport)
     CustomYears(u32),
     CustomMonths(u32),
     CustomDays(u32),
@@ -89,10 +86,10 @@ impl RecurrenceRule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordHealthBucket {
-    Expired,   // Days remaining < 0
-    Critical,  // Due in <= 30 days
-    Upcoming,  // Due in <= 90 days (and > 30 days)
-    Healthy,   // Due in > 90 days or no expiration
+    Expired,  // Days remaining < 0
+    Critical, // Due in <= 30 days
+    Upcoming, // Due in <= 90 days (and > 30 days)
+    Healthy,  // Due in > 90 days or no expiration
 }
 
 impl RecordHealthBucket {
@@ -178,7 +175,10 @@ pub fn evaluate_record_radar(record: &HouseholdRecord, as_of_date: &str) -> Reco
             let lead_days = rule.lead_time_days.unwrap() as i32;
             d <= lead_days
         }
-        _ => matches!(bucket, RecordHealthBucket::Expired | RecordHealthBucket::Critical),
+        _ => matches!(
+            bucket,
+            RecordHealthBucket::Expired | RecordHealthBucket::Critical
+        ),
     };
 
     let next_renewal_date = match (&record.expiration_date, &record.recurrence_rule) {
@@ -283,7 +283,8 @@ fn is_valid_date_format(date_str: &str) -> bool {
 
     match (y, m, d) {
         (Ok(year), Ok(month), Ok(day)) => {
-            if !(1..=9999).contains(&year) || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+            if !(1..=9999).contains(&year) || !(1..=12).contains(&month) || !(1..=31).contains(&day)
+            {
                 return false;
             }
             let max_days = match month {
@@ -388,7 +389,8 @@ pub fn load_inventory_from_path(path: &Path) -> Result<RecordInventory, String> 
     }
 
     let json = read_utf8_sig(path)?;
-    serde_json::from_str(&json).map_err(|error| format!("failed to parse record inventory: {error}"))
+    serde_json::from_str(&json)
+        .map_err(|error| format!("failed to parse record inventory: {error}"))
 }
 
 pub fn save_inventory_to_path(path: &Path, inventory: &RecordInventory) -> Result<(), String> {
@@ -401,7 +403,7 @@ pub fn save_inventory_to_path(path: &Path, inventory: &RecordInventory) -> Resul
 }
 
 pub fn inventory_path() -> PathBuf {
-    PathBuf::from(INVENTORY_PATH)
+    PathBuf::from(crate::config::get("inventory_path"))
 }
 
 #[tauri::command]
@@ -476,7 +478,7 @@ pub fn resolve_record_path(file_path: &str) -> PathBuf {
         return p.to_path_buf();
     }
 
-    let vault_base = Path::new(VAULT_ROOT);
+    let vault_base = Path::new(crate::config::get("vault_root"));
     let trimmed = file_path.trim_start_matches(['/', '\\']);
 
     // Check directly relative to vault root
@@ -564,7 +566,7 @@ mod tests {
             id: "rec-001".to_string(),
             title: "Passports".to_string(),
             category: "Identity".to_string(),
-            owner: "Kevin".to_string(),
+            owner: "Example Owner".to_string(),
             expiration_date: Some("2030-05-15".to_string()),
             file_path: Some("Vault/Personal/passport.pdf".to_string()),
             notes: Some("Kept in physical safe".to_string()),
@@ -637,7 +639,8 @@ mod tests {
 
     #[test]
     fn test_inventory_atomic_lifecycle() {
-        let temp_dir = std::env::temp_dir().join(format!("navis_recon_test_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("navis_recon_test_{}", std::process::id()));
         let inventory_file = temp_dir.join("records").join("inventory.json");
 
         let loaded = load_inventory_from_path(&inventory_file).unwrap();
@@ -647,7 +650,7 @@ mod tests {
             id: "rec-1".to_string(),
             title: "Car Title".to_string(),
             category: "Vehicles".to_string(),
-            owner: "Kevin".to_string(),
+            owner: "Example Owner".to_string(),
             expiration_date: None,
             file_path: Some("Safe/car_title.pdf".to_string()),
             notes: None,
@@ -763,7 +766,7 @@ mod tests {
                 id: "rec-exp".to_string(),
                 title: "Expired Registration".to_string(),
                 category: "Vehicles".to_string(),
-                owner: "Kevin".to_string(),
+                owner: "Example Owner".to_string(),
                 expiration_date: Some("2026-09-01".to_string()),
                 file_path: None,
                 notes: None,
@@ -775,7 +778,7 @@ mod tests {
                 id: "rec-crit".to_string(),
                 title: "Driver License".to_string(),
                 category: "Identity".to_string(),
-                owner: "Kevin".to_string(),
+                owner: "Example Owner".to_string(),
                 expiration_date: Some("2026-10-20".to_string()), // 15 days out
                 file_path: None,
                 notes: None,
@@ -799,7 +802,7 @@ mod tests {
                 id: "rec-health".to_string(),
                 title: "Passport".to_string(),
                 category: "Identity".to_string(),
-                owner: "Kevin".to_string(),
+                owner: "Example Owner".to_string(),
                 expiration_date: Some("2034-05-01".to_string()),
                 file_path: None,
                 notes: None,
@@ -811,7 +814,7 @@ mod tests {
                 id: "rec-none".to_string(),
                 title: "Social Security Card".to_string(),
                 category: "Identity".to_string(),
-                owner: "Kevin".to_string(),
+                owner: "Example Owner".to_string(),
                 expiration_date: None,
                 file_path: None,
                 notes: None,
@@ -851,7 +854,7 @@ mod tests {
             id: "rec-lead-60".to_string(),
             title: "Car Insurance Renewal".to_string(),
             category: "Insurance".to_string(),
-            owner: "Kevin".to_string(),
+            owner: "Example Owner".to_string(),
             expiration_date: Some("2026-11-19".to_string()), // 45 days out
             file_path: None,
             notes: None,
@@ -873,7 +876,7 @@ mod tests {
             id: "rec-lead-7".to_string(),
             title: "Short Notice Item".to_string(),
             category: "Home".to_string(),
-            owner: "Kevin".to_string(),
+            owner: "Example Owner".to_string(),
             expiration_date: Some("2026-10-25".to_string()), // 20 days out
             file_path: None,
             notes: None,
@@ -908,11 +911,15 @@ mod tests {
         // Invalid month/date formats return Err
         let res_invalid_month = get_records_radar(Some("2026-13-01".to_string()));
         assert!(res_invalid_month.is_err());
-        assert!(res_invalid_month.unwrap_err().contains("Invalid as_of_date format"));
+        assert!(res_invalid_month
+            .unwrap_err()
+            .contains("Invalid as_of_date format"));
 
         let res_malformed = get_records_radar(Some("not-a-date".to_string()));
         assert!(res_malformed.is_err());
-        assert!(res_malformed.unwrap_err().contains("Invalid as_of_date format"));
+        assert!(res_malformed
+            .unwrap_err()
+            .contains("Invalid as_of_date format"));
     }
 
     #[test]
@@ -926,8 +933,8 @@ mod tests {
     fn test_resolve_record_path() {
         let rel_path = "Personal/test_file.pdf";
         let resolved = resolve_record_path(rel_path);
-        // Should prepend VAULT_ROOT
-        assert!(resolved.to_string_lossy().contains("Navis-Vault"));
+        // Should prepend crate::config::get("vault_root")
+        assert!(resolved.starts_with(crate::config::get("vault_root")));
 
         let abs_path = if cfg!(windows) {
             "C:\\SomeFolder\\file.pdf"

@@ -1,0 +1,14 @@
+{
+  "checklist_path": "C:/Example/checklist.json",
+  "ledger_path": "C:/Example/Sovereign.beancount",
+  "retirement_401k_account": "Assets:Retirement:401k",
+  "ira_primary_account": "Assets:Retirement:IRA:Primary",
+  "ira_secondary_account": "Assets:Retirement:IRA:Secondary",
+  "stocks_secondary_account": "Assets:Investments:Stocks:Secondary",
+  "subscriptions_path": "C:/Example/subscriptions.json",
+  "vault_root": "C:/Example/Navis-Vault",
+  "inventory_path": "C:/Example/inventory.json",
+  "statements_path": "C:/Example/Statements",
+  "statement_archive_path": "C:/Example/Statements",
+  "harvester_script": "C:/Example/finance_processor.py"
+}

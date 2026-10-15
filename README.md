@@ -1,4 +1,4 @@
-# 🧭 Navis-Recon
+﻿# 🧭 Navis-Recon
 
 > **High-speed financial reconnaissance and ledger reconciliation hub for the Sovereign master ledger.**
 
@@ -12,7 +12,7 @@
 
 ## 🏛️ Overview
 
-**Navis-Recon** is the dedicated financial command center for the Hozak household. Designed as a focused, high-precision interface for `Sovereign.beancount`, it balances a traditional respect for generational stewardship with a forward-thinking, dark-mode fintech terminal.
+**Navis-Recon** is the dedicated financial command center for households. Designed as a focused, high-precision interface for `Sovereign.beancount`, it balances a traditional respect for generational stewardship with a forward-thinking, dark-mode fintech terminal.
 
 Unlike bloated third-party SaaS budgeting tools or complex gaming-themed lore portals, **Navis-Recon** is completely standalone, private, and deterministic. It operates directly against plain-text double-entry accounting records, prioritizing speed, data integrity, and tactile transaction approval.
 
@@ -61,7 +61,7 @@ Navis-Recon/
 * **Desktop Shell:** [Tauri v2](https://v2.tauri.app/) (Windows native desktop window, IPC bridge, event streaming).
 * **Accounting Engine:** Native Rust (`ledger_parser.rs`, `ledger_review.rs`) with atomic file replacements.
 * **Frontend:** [React 19](https://react.dev/), [Vite 8](https://vite.dev/), [Tailwind CSS v4](https://tailwindcss.com/), [Lucide Icons](https://lucide.dev/), [Recharts](https://recharts.org/), [Framer Motion](https://www.framer.com/motion/).
-* **Data Manifold:** Sourced securely from `G:\My Drive\Navis-Vault\Ledger\Sovereign.beancount` and `checklist.json`.
+* **Data Manifold:** Sourced securely from `C:/Example/Sovereign.beancount` and `checklist.json`.
 * **Harvester Bridge:** Python financial artifact classifier (`finance_processor.py`) orchestrated directly via Tauri child processes without a web server.
 
 ---
@@ -147,3 +147,9 @@ start.bat
 The build also publishes `Navis-Recon.exe`, `Navis-Recon-Setup.exe`, and `Navis-Recon.lnk` directly in the repository root for convenient launching.
 
 The custom compass-ledger application icon is authored in `frontend/src-tauri/icon-source.svg` and compiled into the Windows asset at `frontend/src-tauri/icons/icon.ico`. Retired FastAPI and dual-server launch artifacts are preserved under `docs/archive/`.
+
+## Local configuration
+
+Copy `config.example.json` to `config.local.json` and set absolute paths for your ledger, checklist, subscriptions, records, statement directories, and harvester script. Configure the account mappings to match your ledger. Local settings and household data are ignored by Git.
+
+The app reads `NAVIS_RECON_CONFIG` when set; otherwise it looks beside the executable, then in the current directory and its parents. Without a configuration file it uses generic `data/` paths. For an installed app, put the configuration beside the executable or set `NAVIS_RECON_CONFIG` to its absolute location. Keep this file private; it is not bundled into release builds.

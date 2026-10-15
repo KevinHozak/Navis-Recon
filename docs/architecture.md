@@ -1,6 +1,6 @@
-# Architecture: Navis-Recon
+﻿# Architecture: Navis-Recon
 
-Navis-Recon is the dedicated, standalone financial command center for the Hozak household. Designed as a high-precision interface for `Sovereign.beancount`, it operates as a packaged Tauri v2 desktop application powered by a native Rust accounting engine.
+Navis-Recon is the dedicated, standalone financial command center for households. Designed as a high-precision interface for `Sovereign.beancount`, it operates as a packaged Tauri v2 desktop application powered by a native Rust accounting engine.
 
 ---
 
@@ -36,8 +36,8 @@ Unlike traditional client-server setups, Navis-Recon runs entirely locally witho
 ## 📂 The Data Source (Vault Protocols)
 
 The ultimate source of truth is stored in the Navis-Vault ledger manifold:
-* **Ledger File:** `G:\My Drive\Navis-Vault\Ledger\Sovereign.beancount`
-* **Audit Checklist:** `G:\My Drive\Navis-Vault\Ledger\checklist.json`
+* **Ledger File:** `C:/Example/Sovereign.beancount`
+* **Audit Checklist:** `C:/Example/checklist.json`
 
 All ledger and checklist mutations use atomic write patterns (`.tmp` staging with native Windows `MoveFileExW` replacement flags) to guarantee zero corruption or partial writes across cloud sync cycles.
 
@@ -102,7 +102,7 @@ Located in `frontend/`, the UI is a React 19 single-page application styled with
 ## 🛡️ Operational Mandates (Vault Protocol)
 
 1. **Strict Chronology:** Statements must be archived using the format `[Institution] [YYYY-MM-DD].pdf`.
-2. **Directory Structure:** No financial PDFs in the root. Everything resides inside `G:\My Drive\Navis-Vault\Ledger\`:
+2. **Directory Structure:** No financial PDFs in the root. Everything resides inside `C:/Example/`:
    - `Statements/`: Archive of all income/expense reports.
    - `Policies/`: Insurance, Taxes, and long-term contracts.
    - `Sovereign.beancount`: Active tracking sheets and reconciliation reports.

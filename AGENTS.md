@@ -1,10 +1,10 @@
-# 🤖 AGENTS.md
+﻿# 🤖 AGENTS.md
 
 > [!IMPORTANT]
 > Read this for project startup, architecture mapping, and system-wide directives when pair-programming on Navis-Recon.
 
 ## 🏛️ Project Overview
-**Navis-Recon** is a standalone Tauri desktop application designed as the primary financial hub for the Hozak family. It serves as a visual frontend and triage interface for the `Sovereign.beancount` master ledger.
+**Navis-Recon** is a standalone Tauri desktop application designed as the primary financial hub for households. It serves as a visual frontend and triage interface for the `Sovereign.beancount` master ledger.
 
 Unlike Navis-Web, which is heavily themed around sci-fi RPG lore, Navis-Recon is a clean, hyper-focused financial dashboard that prioritizes data precision, net worth tracking, and high-speed ledger review.
 
@@ -35,7 +35,7 @@ The workspace contains a React frontend and a native Rust desktop backend:
 
 ### 2. Vault Mapping
 The backend requires access to the Obsidian vault to read the Beancount ledger:
-- **Ledger Path:** `G:\My Drive\Navis-Protocol\Facilities\Vault\Ledger\Sovereign.beancount`
+- **Ledger Path:** `C:/Example/Sovereign.beancount`
 
 ---
 

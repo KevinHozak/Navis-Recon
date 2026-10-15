@@ -3,8 +3,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use tauri::{AppHandle, Emitter};
 
-const SCRIPT_PATH: &str = r"C:\Users\khoza\.gemini\config\plugins\workflow-tools-plugin\skills\codex-harvester\scripts\finance_processor.py";
-
 fn emit(app: &AppHandle, event: &str, payload: Value) {
     let _ = app.emit(event, payload);
 }
@@ -28,7 +26,7 @@ fn process_stdout_line(app: &AppHandle, line: &str) {
 
 fn run_analysis(app: AppHandle) {
     let mut child = match Command::new("python")
-        .arg(SCRIPT_PATH)
+        .arg(crate::config::get("harvester_script"))
         .arg("--analyze")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -74,8 +72,8 @@ fn run_analysis(app: AppHandle) {
 
 #[tauri::command]
 pub fn start_ledger_sync(app: AppHandle) -> Result<(), String> {
-    if !std::path::Path::new(SCRIPT_PATH).exists() {
-        return Err(format!("Harvester script not found: {SCRIPT_PATH}"));
+    if !std::path::Path::new(crate::config::get("harvester_script")).exists() {
+        return Err("Configured harvester script was not found".to_string());
     }
     tauri::async_runtime::spawn_blocking(move || run_analysis(app));
     Ok(())
@@ -84,7 +82,7 @@ pub fn start_ledger_sync(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn commit_ledger_sync(payload: Vec<Value>) -> Result<Value, String> {
     let mut child = Command::new("python")
-        .arg(SCRIPT_PATH)
+        .arg(crate::config::get("harvester_script"))
         .arg("--commit")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

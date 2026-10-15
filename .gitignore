@@ -23,3 +23,31 @@ Thumbs.db
 # IDE
 .idea/
 .vscode/
+
+# Private configuration, credentials, and household data
+.env.*
+!.env.example
+config.local.json
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+*service-account*.json
+*.beancount
+*.pdf
+*.csv
+*.ofx
+*.qfx
+*.qif
+*.sqlite
+*.sqlite3
+*.db
+*.db-*
+checklist.json
+subscriptions.json
+inventory.json
+/data/
+*.lnk
+/.worktrees/
+/frontend/dev-dist/

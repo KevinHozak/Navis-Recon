@@ -1,7 +1,7 @@
 import beancount.loader
 from beancount.core import realization
 
-LEDGER_PATH = r"G:\My Drive\Navis-Protocol\Facilities\Vault\Ledger\Sovereign.beancount"
+LEDGER_PATH = r"C:/Example/Sovereign.beancount"
 
 entries, errors, options_map = beancount.loader.load_file(LEDGER_PATH)
 root = realization.realize(entries)

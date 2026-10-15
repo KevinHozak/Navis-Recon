@@ -2,8 +2,6 @@ use serde::Serialize;
 use std::fs;
 use std::path::Path;
 
-const LEDGER_PATH: &str = r"G:\My Drive\Navis-Vault\Ledger\Sovereign.beancount";
-
 #[derive(Debug, Serialize)]
 pub struct PendingLedgerTransaction {
     pub date: String,
@@ -14,7 +12,8 @@ pub struct PendingLedgerTransaction {
 }
 
 fn read_ledger() -> Result<String, String> {
-    let bytes = fs::read(LEDGER_PATH).map_err(|error| format!("failed to read ledger: {error}"))?;
+    let bytes = fs::read(crate::config::get("ledger_path"))
+        .map_err(|error| format!("failed to read ledger: {error}"))?;
     String::from_utf8(bytes).map_err(|error| format!("ledger is not valid UTF-8: {error}"))
 }
 
@@ -60,7 +59,7 @@ fn replace_file(temp_path: &Path, path: &Path) -> Result<(), String> {
 }
 
 fn write_ledger_atomic(contents: &str) -> Result<(), String> {
-    let path = Path::new(LEDGER_PATH);
+    let path = Path::new(crate::config::get("ledger_path"));
     let parent = path
         .parent()
         .ok_or_else(|| "ledger path has no parent".to_string())?;
