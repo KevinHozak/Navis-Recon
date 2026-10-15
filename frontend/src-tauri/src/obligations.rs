@@ -6,8 +6,6 @@ use std::path::Path;
 
 use crate::ledger_parser::{parse_ledger, read_ledger, Transaction};
 
-pub const SUBSCRIPTIONS_PATH: &str = r"G:\My Drive\Navis-Vault\Ledger\subscriptions.json";
-
 /// Cadence classifications for recurring obligations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -554,25 +552,13 @@ pub fn analyze_recurring_obligations_with_registry(
         let cadence = if (6..=8).contains(&median_interval) && t12_postings.len() >= 6 && cv <= 0.60
         {
             Some(RecurrenceCadence::Weekly)
-        } else if (13..=16).contains(&median_interval)
-            && t12_postings.len() >= 4
-            && cv <= 0.50
-        {
+        } else if (13..=16).contains(&median_interval) && t12_postings.len() >= 4 && cv <= 0.50 {
             Some(RecurrenceCadence::Biweekly)
-        } else if (25..=35).contains(&median_interval)
-            && t12_postings.len() >= 2
-            && cv <= 0.50
-        {
+        } else if (25..=35).contains(&median_interval) && t12_postings.len() >= 2 && cv <= 0.50 {
             Some(RecurrenceCadence::Monthly)
-        } else if (75..=105).contains(&median_interval)
-            && t12_postings.len() >= 2
-            && cv <= 0.40
-        {
+        } else if (75..=105).contains(&median_interval) && t12_postings.len() >= 2 && cv <= 0.40 {
             Some(RecurrenceCadence::Quarterly)
-        } else if (160..=200).contains(&median_interval)
-            && t12_postings.len() >= 1
-            && cv <= 0.35
-        {
+        } else if (160..=200).contains(&median_interval) && t12_postings.len() >= 1 && cv <= 0.35 {
             Some(RecurrenceCadence::SemiAnnual)
         } else if (330..=395).contains(&median_interval)
             && txs.len() >= 2
@@ -645,7 +631,7 @@ pub fn analyze_recurring_obligations_with_registry(
 pub fn get_recurring_obligations() -> Result<Vec<RecurringObligation>, String> {
     let ledger_content = read_ledger()?;
     let transactions = parse_ledger(&ledger_content);
-    let path = Path::new(SUBSCRIPTIONS_PATH);
+    let path = Path::new(crate::config::get("subscriptions_path"));
     let registry = if path.exists() {
         load_subscription_registry(path)?
     } else {
@@ -662,13 +648,13 @@ pub fn get_recurring_obligations() -> Result<Vec<RecurringObligation>, String> {
 /// Tauri command to retrieve raw subscription registry metadata payload from `subscriptions.json`.
 #[tauri::command]
 pub fn get_subscription_registry() -> Result<SubscriptionRegistryPayload, String> {
-    load_subscription_registry(Path::new(SUBSCRIPTIONS_PATH))
+    load_subscription_registry(Path::new(crate::config::get("subscriptions_path")))
 }
 
 /// Tauri command to save or update an individual subscription's metadata in `subscriptions.json`.
 #[tauri::command]
 pub fn save_subscription_metadata(metadata: SubscriptionMetadata) -> Result<(), String> {
-    let path = Path::new(SUBSCRIPTIONS_PATH);
+    let path = Path::new(crate::config::get("subscriptions_path"));
     let mut payload = if path.exists() {
         load_subscription_registry(path)?
     } else {
@@ -699,7 +685,10 @@ pub fn save_subscription_metadata(metadata: SubscriptionMetadata) -> Result<(), 
 pub fn save_subscription_registry_payload(
     payload: SubscriptionRegistryPayload,
 ) -> Result<(), String> {
-    save_subscription_registry(Path::new(SUBSCRIPTIONS_PATH), &payload)
+    save_subscription_registry(
+        Path::new(crate::config::get("subscriptions_path")),
+        &payload,
+    )
 }
 
 #[cfg(test)]
@@ -996,11 +985,8 @@ mod tests {
         });
 
         // Anchor on 2026-05-05 (5 days before trial expiration)
-        let obligations = analyze_recurring_obligations_with_registry(
-            &txs,
-            Some("2026-05-05"),
-            &registry,
-        );
+        let obligations =
+            analyze_recurring_obligations_with_registry(&txs, Some("2026-05-05"), &registry);
 
         assert_eq!(obligations.len(), 1);
         let item = &obligations[0];
@@ -1060,7 +1046,10 @@ mod tests {
         fs::write(&test_file, b"{\"subscriptions\": [ invalid json ").unwrap();
 
         let result = load_subscription_registry(&test_file);
-        assert!(result.is_err(), "Corrupted registry should return Err, not default");
+        assert!(
+            result.is_err(),
+            "Corrupted registry should return Err, not default"
+        );
 
         let _ = fs::remove_file(&test_file);
     }

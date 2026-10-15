@@ -2,8 +2,6 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
-pub const LEDGER_PATH: &str = r"G:\My Drive\Navis-Vault\Ledger\Sovereign.beancount";
-
 #[derive(Debug, Clone)]
 pub(crate) struct Posting {
     pub(crate) account: String,
@@ -36,16 +34,16 @@ pub struct HistorySnapshot {
     pub name: String,
     #[serde(rename = "Net Worth")]
     pub net_worth: f64,
-    #[serde(rename = "401k (K)")]
-    pub retirement_401k_k: f64,
-    #[serde(rename = "IRA (J)")]
-    pub ira_j: f64,
-    #[serde(rename = "IRA (K)")]
-    pub ira_k: f64,
+    #[serde(rename = "401k")]
+    pub retirement_401k: f64,
+    #[serde(rename = "IRA Primary")]
+    pub ira_primary: f64,
+    #[serde(rename = "IRA Secondary")]
+    pub ira_secondary: f64,
     #[serde(rename = "Stocks")]
     pub stocks: f64,
-    #[serde(rename = "J-Stocks")]
-    pub j_stocks: f64,
+    #[serde(rename = "Stocks Secondary")]
+    pub stocks_secondary: f64,
     #[serde(rename = "HSA")]
     pub hsa: f64,
 }
@@ -60,7 +58,8 @@ pub struct LedgerTransaction {
 }
 
 pub(crate) fn read_ledger() -> Result<String, String> {
-    let bytes = fs::read(LEDGER_PATH).map_err(|error| format!("failed to read ledger: {error}"))?;
+    let bytes = fs::read(crate::config::get("ledger_path"))
+        .map_err(|error| format!("failed to read ledger: {error}"))?;
     String::from_utf8(bytes).map_err(|error| format!("ledger is not valid UTF-8: {error}"))
 }
 
@@ -202,11 +201,27 @@ fn snapshot(name: String, balances: &BTreeMap<String, f64>) -> HistorySnapshot {
     HistorySnapshot {
         name,
         net_worth: round(net_worth),
-        retirement_401k_k: round(*balances.get("Assets:Retirement:401k:K").unwrap_or(&0.0)),
-        ira_j: round(*balances.get("Assets:Retirement:IRA:J").unwrap_or(&0.0)),
-        ira_k: round(*balances.get("Assets:Retirement:IRA:K").unwrap_or(&0.0)),
+        retirement_401k: round(
+            *balances
+                .get(crate::config::get("retirement_401k_account"))
+                .unwrap_or(&0.0),
+        ),
+        ira_primary: round(
+            *balances
+                .get(crate::config::get("ira_primary_account"))
+                .unwrap_or(&0.0),
+        ),
+        ira_secondary: round(
+            *balances
+                .get(crate::config::get("ira_secondary_account"))
+                .unwrap_or(&0.0),
+        ),
         stocks: round(*balances.get("Assets:Investments:Stocks").unwrap_or(&0.0)),
-        j_stocks: round(*balances.get("Assets:Investments:JStocks").unwrap_or(&0.0)),
+        stocks_secondary: round(
+            *balances
+                .get(crate::config::get("stocks_secondary_account"))
+                .unwrap_or(&0.0),
+        ),
         hsa: round(subtree_total(balances, "Assets:Retirement:HSA")),
     }
 }

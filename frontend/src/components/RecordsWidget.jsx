@@ -799,7 +799,7 @@ export default function RecordsWidget() {
                 </label>
                 <input
                   type="text"
-                  placeholder="e.g. G:\My Drive\Navis-Vault\Personal\Passports\kevin.pdf"
+                  placeholder="e.g. C:/Example/Records/document.pdf"
                   value={formFilePath}
                   onChange={(e) => setFormFilePath(e.target.value)}
                   className="w-full bg-zinc-900 border border-white/10 rounded px-3 py-2 text-xs text-white focus:border-accent outline-none font-mono"

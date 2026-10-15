@@ -4,10 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 /// Primary path per Vault Protocol:
-pub const VAULT_STATEMENTS_PATH: &str = r"G:\My Drive\Navis-Vault\Ledger\Statements";
 
 /// Canonical archive directory used by harvester / historical archive:
-pub const FINANCES_STATEMENTS_PATH: &str = r"G:\My Drive\Finances\Statements";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct StatementMetadata {
@@ -52,15 +50,14 @@ pub struct StatementCatalog {
 }
 
 /// Resolves the statement repository base directory.
-/// Prefers `G:\My Drive\Navis-Vault\Ledger\Statements` if it contains files;
-/// falls back to `G:\My Drive\Finances\Statements` if the primary directory is empty or missing.
+/// Prefers the configured statement directory, then the configured archive.
 pub fn resolve_statements_base_dir() -> PathBuf {
-    let vault_path = PathBuf::from(VAULT_STATEMENTS_PATH);
+    let vault_path = PathBuf::from(crate::config::get("statements_path"));
     if dir_has_entries(&vault_path) {
         return vault_path;
     }
 
-    let finances_path = PathBuf::from(FINANCES_STATEMENTS_PATH);
+    let finances_path = PathBuf::from(crate::config::get("statement_archive_path"));
     if dir_has_entries(&finances_path) {
         return finances_path;
     }
@@ -407,8 +404,7 @@ fn scan_dir_recursive(root_dir: &Path, current_dir: &Path, out: &mut Vec<Stateme
                 .and_then(|stem| stem.to_str())
                 .unwrap_or("");
 
-            let (institution, date, disambiguation, is_canonical) =
-                parse_statement_filename(stem);
+            let (institution, date, disambiguation, is_canonical) = parse_statement_filename(stem);
 
             let folder = path
                 .parent()
@@ -526,8 +522,7 @@ mod tests {
 
     #[test]
     fn test_parse_disambiguated_statement() {
-        let (inst, date, disambig, canonical) =
-            parse_statement_filename("Amazon 2026-02-04 B");
+        let (inst, date, disambig, canonical) = parse_statement_filename("Amazon 2026-02-04 B");
         assert_eq!(inst, "Amazon");
         assert_eq!(date, Some("2026-02-04".to_string()));
         assert_eq!(disambig, Some("B".to_string()));
@@ -550,11 +545,15 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
         fs::create_dir_all(temp_dir.join("Statements 2026")).unwrap();
 
-        let file1 = temp_dir.join("Statements 2026").join("Chase Freedom 2026-03-01.pdf");
+        let file1 = temp_dir
+            .join("Statements 2026")
+            .join("Chase Freedom 2026-03-01.pdf");
         let mut f1 = File::create(&file1).unwrap();
         f1.write_all(b"%PDF-1.4 test").unwrap();
 
-        let file2 = temp_dir.join("Statements 2026").join("Amazon 2026-03-01 B.pdf");
+        let file2 = temp_dir
+            .join("Statements 2026")
+            .join("Amazon 2026-03-01 B.pdf");
         let mut f2 = File::create(&file2).unwrap();
         f2.write_all(b"%PDF-1.4 test b").unwrap();
 
@@ -775,6 +774,9 @@ mod tests {
             elapsed
         );
 
-        assert!(elapsed.as_secs() < 2, "Scanning should complete within seconds");
+        assert!(
+            elapsed.as_secs() < 2,
+            "Scanning should complete within seconds"
+        );
     }
 }

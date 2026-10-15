@@ -1,4 +1,5 @@
 mod checklist;
+mod config;
 mod ledger_parser;
 mod ledger_review;
 mod obligations;

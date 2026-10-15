@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+﻿from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -20,9 +20,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-LEDGER_PATH = r"G:\My Drive\Navis-Vault\Ledger\Sovereign.beancount"
-CHECKLIST_PATH = r"G:\My Drive\Navis-Vault\Ledger\checklist.json"
-PERFORMANCE_DASHBOARD_PATH = r"G:\My Drive\Navis-Vault\Ledger\Wealth_Performance_Dashboard_v2.md"
+LEDGER_PATH = r"C:/Example/Sovereign.beancount"
+CHECKLIST_PATH = r"C:/Example/checklist.json"
+PERFORMANCE_DASHBOARD_PATH = r"C:/Example/Wealth_Performance_Dashboard_v2.md"
 
 class LedgerApproveRequest(BaseModel):
     line_num: int
@@ -119,11 +119,11 @@ async def get_ledger_history():
                 monthly_snapshots[month_str] = {
                     "name": month_str,
                     "Net Worth": round(nw, 2),
-                    "401k (K)": round(balances.get('Assets:Retirement:401k:K', 0.0), 2),
-                    "IRA (J)": round(balances.get('Assets:Retirement:IRA:J', 0.0), 2),
-                    "IRA (K)": round(balances.get('Assets:Retirement:IRA:K', 0.0), 2),
+                    "401k": round(balances.get('Assets:Retirement:401k', 0.0), 2),
+                    "IRA Primary": round(balances.get('Assets:Retirement:IRA:Primary', 0.0), 2),
+                    "IRA Secondary": round(balances.get('Assets:Retirement:IRA:Secondary', 0.0), 2),
                     "Stocks": round(balances.get('Assets:Investments:Stocks', 0.0), 2),
-                    "J-Stocks": round(balances.get('Assets:Investments:JStocks', 0.0), 2),
+                    "Stocks Secondary": round(balances.get('Assets:Investments:Stocks:Secondary', 0.0), 2),
                     "HSA": round(hsa_total, 2)
                 }
 
@@ -260,7 +260,7 @@ async def get_ledger_transactions(prefix: str):
 @app.get("/api/ledger/sync/stream")
 async def run_ledger_sync():
     def generate():
-        script_path = r"C:\Users\khoza\.gemini\config\plugins\workflow-tools-plugin\skills\codex-harvester\scripts\finance_processor.py"
+        script_path = r"C:/Example/finance_processor.py"
         try:
             # We use bufsize=1 and universal_newlines=True to get line-buffered output
             process = subprocess.Popen(
@@ -284,7 +284,7 @@ async def run_ledger_sync():
 @app.post("/api/ledger/sync/commit")
 async def commit_ledger_sync(payload: list):
     try:
-        script_path = r"C:\Users\khoza\.gemini\config\plugins\workflow-tools-plugin\skills\codex-harvester\scripts\finance_processor.py"
+        script_path = r"C:/Example/finance_processor.py"
         # Run subprocess and pass payload via stdin
         process = subprocess.Popen(
             ["python", script_path, "--commit"],

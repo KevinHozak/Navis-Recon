@@ -122,16 +122,16 @@ export default function WealthDashboardWidget() {
         
         <h2 className="text-2xl font-black mt-16 mb-8 text-accent border-b border-accent/20 pb-4">Retirement Accounts</h2>
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
-          {renderChart("401k (K)", "401k (K)", "#4f46e5")}
-          {renderChart("IRA (J)", "IRA (J)", "#4f46e5")}
-          {renderChart("IRA (K)", "IRA (K)", "#4f46e5")}
+          {renderChart("401k", "401k", "#4f46e5")}
+          {renderChart("IRA Primary", "IRA Primary", "#4f46e5")}
+          {renderChart("IRA Secondary", "IRA Secondary", "#4f46e5")}
           {renderChart("HSA", "HSA", "#4f46e5")}
         </div>
 
         <h2 className="text-2xl font-black mt-16 mb-8 text-accent border-b border-accent/20 pb-4">Brokerage & Investments</h2>
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
           {renderChart("Stocks", "Stocks", "#0ea5e9")}
-          {renderChart("J-Stocks", "J-Stocks", "#0ea5e9")}
+          {renderChart("Stocks Secondary", "Stocks Secondary", "#0ea5e9")}
         </div>
       </div>
     </div>
