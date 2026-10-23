@@ -6,13 +6,17 @@ import { getLedgerSummary } from '../services/apiClient';
 export default function CategoryDetailWidget({ categoryKey, title, icon, isLiability = false }) {
   const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
   async function fetchSummary() {
     try {
       setLoading(true);
+      setError(null);
+      setSummary(null);
       setSummary(await getLedgerSummary());
     } catch (e) {
       console.error("Failed to fetch summary", e);
+      setError(String(e));
     } finally {
       setLoading(false);
     }
@@ -28,8 +32,12 @@ export default function CategoryDetailWidget({ categoryKey, title, icon, isLiabi
     return <div className="p-8 text-center text-accent uppercase font-mono animate-pulse">Loading {title}...</div>;
   }
 
+  if (error) {
+    return <div className="text-red-400 font-mono">{title} totals unavailable: {error}</div>;
+  }
+
   if (!summary || !summary[categoryKey]) {
-    return <div className="text-red-400">Error loading data for {title}.</div>;
+    return <div className="text-red-400 font-mono">{title} totals unavailable{error ? `: ${error}` : '.'}</div>;
   }
 
   const rawData = summary[categoryKey];

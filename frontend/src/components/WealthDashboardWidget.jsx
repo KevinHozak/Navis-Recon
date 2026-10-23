@@ -41,7 +41,7 @@ export default function WealthDashboardWidget() {
       setHistory(await getLedgerHistory());
     } catch (e) {
       console.error(e);
-      setError("Network error fetching dashboard history");
+      setError(e?.message || String(e) || "Failed to fetch dashboard history");
     } finally {
       setLoading(false);
     }

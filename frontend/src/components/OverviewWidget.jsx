@@ -5,12 +5,14 @@ import { getLedgerSummary } from '../services/apiClient';
 export default function OverviewWidget({ onNavigateToReviews }) {
   const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
   async function fetchSummary() {
     try {
       setSummary(await getLedgerSummary());
     } catch (e) {
       console.error("Failed to fetch summary", e);
+      setError(String(e));
     } finally {
       setLoading(false);
     }
@@ -27,7 +29,7 @@ export default function OverviewWidget({ onNavigateToReviews }) {
   }
 
   if (!summary) {
-    return <div className="text-red-400">Error loading summary.</div>;
+    return <div className="text-red-400 font-mono">Ledger totals unavailable{error ? `: ${error}` : '.'}</div>;
   }
 
   // Calculate totals for asset allocation chart

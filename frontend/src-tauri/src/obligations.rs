@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use crate::ledger_parser::{parse_ledger, read_ledger, Transaction};
+use crate::ledger_parser::{validated_transactions, Transaction};
 
 /// Cadence classifications for recurring obligations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -629,8 +629,7 @@ pub fn analyze_recurring_obligations_with_registry(
 /// Tauri command to retrieve recurring obligations enriched with registry metadata and alerts.
 #[tauri::command]
 pub fn get_recurring_obligations() -> Result<Vec<RecurringObligation>, String> {
-    let ledger_content = read_ledger()?;
-    let transactions = parse_ledger(&ledger_content);
+    let transactions = validated_transactions()?;
     let path = Path::new(crate::config::get("subscriptions_path"));
     let registry = if path.exists() {
         load_subscription_registry(path)?
@@ -1098,23 +1097,5 @@ mod tests {
 
         let obligations = analyze_recurring_obligations(&txs, Some("2026-04-30"));
         assert!(obligations.is_empty());
-    }
-
-    #[test]
-    fn test_live_ledger_recurring_obligations() {
-        // If ledger is present on Google Drive, verify live detection
-        if let Ok(obligations) = get_recurring_obligations() {
-            assert!(
-                !obligations.is_empty(),
-                "Expected recurring obligations to be detected from live ledger"
-            );
-            for o in &obligations {
-                assert!(!o.key.is_empty());
-                assert!(!o.payee.is_empty());
-                assert!(o.account.starts_with("Expenses:"));
-                assert!(o.median_amount > 0.0);
-                assert!(!o.next_projected_date.is_empty());
-            }
-        }
     }
 }

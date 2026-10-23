@@ -1,6 +1,7 @@
 {
   "checklist_path": "C:/Example/checklist.json",
   "ledger_path": "C:/Example/Sovereign.beancount",
+  "ledger_currency": "USD",
   "retirement_401k_account": "Assets:Retirement:401k",
   "ira_primary_account": "Assets:Retirement:IRA:Primary",
   "ira_secondary_account": "Assets:Retirement:IRA:Secondary",

@@ -1,4 +1,4 @@
-﻿# Architecture: Navis-Recon
+# Architecture: Navis-Recon
 
 Navis-Recon is the dedicated, standalone financial command center for households. Designed as a high-precision interface for `Sovereign.beancount`, it operates as a packaged Tauri v2 desktop application powered by a native Rust accounting engine.
 
@@ -53,6 +53,10 @@ All ledger evaluation, line modifications, checklist operations, and sync orches
 * `approve_ledger_transaction`: Safely modifies the transaction on disk by replacing the ` ! ` flag with ` * ` and updating the posting line's category. Uses atomic file replacement to preserve original whitespace, comments, and structure.
 
 ### 2. Ledger Parsing & Telemetry (`ledger_parser.rs`)
+The native reader implements a deliberately small, explicitly USD-only Beancount subset (the default `ledger_currency` is `USD`; other configured currencies are rejected until currency-aware presentation is implemented). It accepts blank lines, full-line comments beginning with `;`, a fully quoted `option "title" "..."`, dated `YYYY-MM-DD open ACCOUNT [USD]` directives, and dated transactions with one or two quoted descriptions. Header and option tokens require whitespace separators. Quoted text cannot contain escaped quotes or backslashes; inline comments are accepted only as standalone comment lines, not trailing posting/header comments. Transactions need at least two indented postings with explicit finite plain decimal amounts bounded to absolute `1e15` and total ledger movement bounded to `1e15`. Posting totals must balance within a fixed absolute `1e-8` tolerance, using f64; large-magnitude residual reliability and exact decimal accounting remain limitations pending RECON-S002. Supported account roots are Assets, Liabilities, Equity, Income, and Expenses; accounts require at least one segment after the root, each segment starts with an ASCII uppercase letter or digit and continues with ASCII letters, digits, or hyphens. The parser rejects includes, inferred amounts, missing or mismatched currencies, commodities, costs, prices, plugins, every option except title, tags/links, metadata, malformed dates/descriptions/accounts, unindented postings, and every other unsupported directive. This is subset validation, not certification by the official Beancount parser, and f64 remains in use. An unsupported or malformed construct rejects the whole ledger for summary, history, account drilldown, and recurring-obligation analysis. Diagnostics include the configured filename and 1-based line number. Semantic failures return a `partial:` error with no partial totals/rows; read and UTF-8 failures return `unavailable:` with no totals. Empty or comment-only ledgers are unavailable rather than a validated zero. Successful summaries include `status: "validated"` and an empty diagnostics list. History, drilldown, and obligations preserve their existing successful response shapes and only succeed after the same complete validation. The frontend displays parser/read diagnostics instead of hiding them behind network errors or stale totals.
+
+Amounts still use `f64` and two-decimal rounding. This is a known precision limitation pending RECON-S002; subset validation does not make floating-point arithmetic exact. No ledger content is written by these telemetry paths.
+
 * `get_ledger_summary`: Evaluates `Sovereign.beancount` into transaction postings and computes live real-time balances for:
   * Net Worth (`total_assets + total_liabilities`)
   * Total Assets and Liabilities
@@ -108,4 +112,3 @@ Located in `frontend/`, the UI is a React 19 single-page application styled with
    - `Sovereign.beancount`: Active tracking sheets and reconciliation reports.
 3. **Audit First:** Every monthly reconcile requires cross-referencing between the **Master Checklist** and bank activity.
 4. **Security:** Never store plaintext passwords. Use Bitwarden integration for all financial credentials.
-

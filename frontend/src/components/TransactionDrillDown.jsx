@@ -1,4 +1,4 @@
-import { Fragment, useState, useEffect, useMemo } from 'react';
+import { Fragment, useState, useEffect, useMemo, useRef } from 'react';
 import { getLedgerTransactions } from '../services/apiClient';
 
 const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -7,25 +7,30 @@ export default function TransactionDrillDown({ prefix, isLiability }) {
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [path, setPath] = useState([]); // e.g. [] -> ['2026'] -> ['2026', 'Q2'] -> ['2026', 'Q2', 'May']
+  const [error, setError] = useState(null);
+  const requestId = useRef(0);
 
-  async function fetchTransactions() {
+  async function fetchTransactions(requestedPrefix) {
+    const id = ++requestId.current;
     try {
       setLoading(true);
-      setTransactions(await getLedgerTransactions(prefix));
+      setError(null);
+      const result = await getLedgerTransactions(requestedPrefix);
+      if (id === requestId.current) setTransactions(result);
     } catch (e) {
       console.error(e);
+      if (id === requestId.current) setError(e?.message || String(e));
     } finally {
-      setLoading(false);
+      if (id === requestId.current) setLoading(false);
     }
   }
 
   useEffect(() => {
     // Refresh the external transaction stream when the account prefix changes.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    fetchTransactions();
+    fetchTransactions(prefix);
     setPath([]);
     // The loader is intentionally scoped to the current prefix.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefix]);
 
   // Grouping Logic
@@ -79,6 +84,7 @@ export default function TransactionDrillDown({ prefix, isLiability }) {
     return <div className="text-white/50 text-center font-mono animate-pulse">Loading transaction graph...</div>;
   }
 
+  if (error) return <div className="text-red-400 text-center font-mono">Transactions unavailable: {error}</div>;
   if (transactions.length === 0) {
     return <div className="text-white/30 text-center font-mono">No transactions found for this category.</div>;
   }

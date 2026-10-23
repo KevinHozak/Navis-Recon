@@ -38,6 +38,7 @@ pub fn get(key: &str) -> &str {
 fn default_value(key: &str) -> &'static str {
     match key {
         "ledger_path" => "data/ledger.beancount",
+        "ledger_currency" => "USD",
         "checklist_path" => "data/checklist.json",
         "subscriptions_path" => "data/subscriptions.json",
         "vault_root" => "data",
