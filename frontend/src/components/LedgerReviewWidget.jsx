@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import CategorySelector from './CategorySelector';
 import { approveLedgerTransaction, getLedgerCategories, getPendingLedger } from '../services/apiClient';
+import { formatMoney, negateMoney, compareMoney } from '../utils/money';
 
 export default function LedgerReviewWidget() {
   const [pending, setPending] = useState([]);
@@ -72,8 +73,8 @@ export default function LedgerReviewWidget() {
               <div>
                 <div className="text-[10px] font-mono text-white/40 mb-1">{tx.date}</div>
                 <div className="text-sm font-bold text-white tracking-wider">{tx.payee}</div>
-                <div className={`text-lg font-mono font-bold ${tx.amount < 0 ? 'text-green-400' : 'text-red-400'}`}>
-                  {tx.amount < 0 ? '+' : ''}{-tx.amount} USD
+                <div className={`text-lg font-mono font-bold ${compareMoney(tx.amount, '0') < 0 ? 'text-green-400' : 'text-red-400'}`}>
+                  {formatMoney(negateMoney(tx.amount), tx.currency)}
                 </div>
               </div>
               <div className="flex items-center gap-4">

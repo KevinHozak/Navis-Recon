@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
 import TransactionDrillDown from './TransactionDrillDown';
 import { getLedgerSummary } from '../services/apiClient';
+import { addMoney, absMoney, compareMoney, formatMoney, moneyToChartNumber } from '../utils/money';
 
 export default function CategoryDetailWidget({ categoryKey, title, icon, isLiability = false }) {
   const [summary, setSummary] = useState(null);
@@ -41,16 +42,19 @@ export default function CategoryDetailWidget({ categoryKey, title, icon, isLiabi
   }
 
   const rawData = summary[categoryKey];
+  const currency = summary.selected_currency || 'USD';
   const chartData = Object.entries(rawData)
-    .filter(([, value]) => value !== 0)
+    .filter(([, value]) => compareMoney(value, '0') !== 0)
     .map(([name, value]) => ({
       name,
-      value: Math.abs(value),
+      value: moneyToChartNumber(absMoney(value)),
+      exactValue: value,
       originalValue: value
     }))
     .sort((a, b) => b.value - a.value);
 
-  const total = chartData.reduce((acc, item) => acc + item.value, 0);
+  const total = chartData.reduce((acc, item) => addMoney(acc, item.exactValue), '0');
+  const chartTotal = chartData.reduce((acc, item) => addMoney(acc, absMoney(item.originalValue)), '0');
 
   // Colors for the donut chart (using Tailwind-ish hex codes)
   const COLORS = isLiability 
@@ -76,7 +80,7 @@ export default function CategoryDetailWidget({ categoryKey, title, icon, isLiabi
           <span className={`text-4xl ${textColor}`}>{icon}</span>
           <h2 className="text-4xl font-black text-white uppercase tracking-tighter">{title}</h2>
           <div className="flex-1" />
-          <span className={`text-3xl font-bold ${textColor}`}>${total.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
+          <span className={`text-3xl font-bold ${textColor}`}>{formatMoney(total, currency)} <small className="text-xs uppercase">{currency} subtotal</small></span>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 items-center">
@@ -100,7 +104,7 @@ export default function CategoryDetailWidget({ categoryKey, title, icon, isLiabi
                   ))}
                 </Pie>
                 <Tooltip 
-                  formatter={(value) => `$${value.toLocaleString('en-US', { minimumFractionDigits: 2 })}`}
+                  formatter={(value, name, item) => [formatMoney(item.payload.exactValue, currency), name]}
                   contentStyle={{ backgroundColor: '#09090b', borderColor: 'rgba(255,255,255,0.1)', color: '#fff', borderRadius: '8px' }}
                   itemStyle={{ color: '#fff', fontWeight: 'bold' }}
                 />
@@ -117,9 +121,9 @@ export default function CategoryDetailWidget({ categoryKey, title, icon, isLiabi
                   <span className="font-mono text-sm text-white/90 font-bold">{item.name}</span>
                 </div>
                 <div className="text-right">
-                  <span className="font-bold text-white/90">${item.value.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
+                  <span className="font-bold text-white/90">{formatMoney(item.exactValue, currency)}</span>
                   <div className="text-[10px] text-white/40 font-mono mt-1">
-                    {((item.value / total) * 100).toFixed(1)}%
+                    {chartTotal === '0.00' || chartTotal === '0' ? '0.0' : ((item.value / moneyToChartNumber(chartTotal)) * 100).toFixed(1)}%
                   </div>
                 </div>
               </div>
@@ -129,7 +133,7 @@ export default function CategoryDetailWidget({ categoryKey, title, icon, isLiabi
 
         {/* Transaction Drill Down */}
         {beancountPrefix && (
-          <TransactionDrillDown prefix={beancountPrefix} isLiability={isLiability} />
+          <TransactionDrillDown prefix={beancountPrefix} isLiability={isLiability} selectedCurrency={currency} />
         )}
       </div>
     </div>

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
 import { getLedgerSummary } from '../services/apiClient';
+import { addMoney, absMoney, compareMoney, formatMoney, moneyToChartNumber } from '../utils/money';
 
 export default function OverviewWidget({ onNavigateToReviews }) {
   const [summary, setSummary] = useState(null);
@@ -33,19 +34,20 @@ export default function OverviewWidget({ onNavigateToReviews }) {
   }
 
   // Calculate totals for asset allocation chart
-  const getSum = (obj) => Object.values(obj || {}).reduce((acc, val) => acc + val, 0);
+  const currency = summary.selected_currency || 'USD';
+  const getSum = (obj) => Object.values(obj || {}).reduce((acc, val) => addMoney(acc, val), '0');
   const assetData = [
     { name: 'Bank Accounts', value: getSum(summary.bank_accounts), color: '#00d4ff' },
     { name: 'Retirement', value: getSum(summary.retirement), color: '#00b4d8' },
     { name: 'Investments', value: getSum(summary.investments), color: '#0096c7' },
-    { name: 'Property', value: summary.housing || 0, color: '#0077b6' },
-  ].filter(d => d.value > 0);
+    { name: 'Property', value: summary.housing || '0', color: '#0077b6' },
+  ].filter(d => compareMoney(d.value, '0') > 0).map(d => ({ ...d, chartValue: moneyToChartNumber(d.value) }));
 
   // Helper to render a card section
   const renderCard = (title, icon, data, isLiability = false) => {
     if (!data || Object.keys(data).length === 0) return null;
     
-    const total = Object.values(data).reduce((acc, val) => acc + val, 0);
+    const total = getSum(data);
     const borderColor = isLiability ? "border-red-500/20" : "border-accent/20";
     const hoverBorder = isLiability ? "hover:border-red-500/50" : "hover:border-accent/50";
     const iconColor = isLiability ? "text-red-500" : "text-accent";
@@ -54,15 +56,15 @@ export default function OverviewWidget({ onNavigateToReviews }) {
       <div className={`p-6 bg-zinc-950 border ${borderColor} rounded shadow-lg ${hoverBorder} transition-colors`}>
         <div className="flex items-center gap-2 mb-4">
           <span className={`${iconColor} text-xl`}>{icon}</span>
-          <h3 className="text-xl font-bold text-white uppercase tracking-wider">{title}</h3>
+          <h3 className="text-xl font-bold text-white uppercase tracking-wider">{title}{isLiability ? ' · debt magnitude' : ''}</h3>
         </div>
-        <p className="text-3xl font-bold text-white/90 mb-6">${Math.abs(total).toLocaleString('en-US', { minimumFractionDigits: 2 })}</p>
+        <p className="text-3xl font-bold text-white/90 mb-6">{formatMoney(isLiability ? absMoney(total) : total, currency)}</p>
         
         <div className="space-y-2">
           {Object.entries(data).map(([account, amount]) => (
             <div key={account} className="flex justify-between text-xs font-mono border-b border-white/5 pb-1">
               <span className="text-white/50">{account}</span>
-              <span className="text-white/80">${Math.abs(amount).toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
+              <span className="text-white/80">{formatMoney(isLiability ? absMoney(amount) : amount, currency)}</span>
             </div>
           ))}
         </div>
@@ -77,9 +79,9 @@ export default function OverviewWidget({ onNavigateToReviews }) {
         <div className="absolute inset-0 bg-accent/5 opacity-0 group-hover:opacity-100 transition-opacity" />
         
         <div className="flex-1 z-10 w-full text-center md:text-left">
-          <p className="text-xs font-mono text-white/50 uppercase tracking-widest mb-2">Total Net Worth</p>
+          <p className="text-xs font-mono text-white/50 uppercase tracking-widest mb-2">{currency} net worth subtotal</p>
           <h2 className="text-5xl md:text-6xl font-black text-white tracking-tighter">
-            ${summary.net_worth.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+            {formatMoney(summary.net_worth, currency)}
           </h2>
         </div>
 
@@ -94,7 +96,7 @@ export default function OverviewWidget({ onNavigateToReviews }) {
                   innerRadius={50}
                   outerRadius={80}
                   paddingAngle={3}
-                  dataKey="value"
+                  dataKey="chartValue"
                   stroke="rgba(255,255,255,0.02)"
                   strokeWidth={2}
                 >
@@ -103,7 +105,7 @@ export default function OverviewWidget({ onNavigateToReviews }) {
                   ))}
                 </Pie>
                 <Tooltip 
-                  formatter={(value) => `$${value.toLocaleString('en-US', { minimumFractionDigits: 2 })}`}
+                  formatter={(value, name, item) => [formatMoney(item.payload.value, currency), name]}
                   contentStyle={{ backgroundColor: '#09090b', borderColor: 'rgba(255,255,255,0.1)', color: '#fff', borderRadius: '8px' }}
                   itemStyle={{ color: '#fff', fontWeight: 'bold' }}
                 />
@@ -112,6 +114,8 @@ export default function OverviewWidget({ onNavigateToReviews }) {
           </div>
         )}
       </div>
+
+      {(summary.unvalued_units || []).length > 0 && <div className="text-amber-300 text-xs font-mono space-y-1"><p>Showing {currency} subtotal only. No valuation is available for {summary.unvalued_units.join(', ')}; these units are excluded from the selected-unit total.</p>{summary.unvalued_units.map(unit => { const totals = summary.totals_by_currency?.[unit]; return totals ? <p key={unit}>{unit} separate net worth: {formatMoney(totals.net_worth, unit)} (assets {formatMoney(totals.total_assets, unit)}; liabilities {formatMoney(absMoney(totals.total_liabilities), unit)}).</p> : null; })}</div>}
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 gap-6">
         {renderCard("Bank Accounts", "🏦", summary.bank_accounts)}

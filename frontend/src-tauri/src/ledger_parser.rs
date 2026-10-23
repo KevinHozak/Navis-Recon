@@ -1,3 +1,4 @@
+use crate::money::Money;
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -7,7 +8,8 @@ use std::{
 #[derive(Debug, Clone)]
 pub(crate) struct Posting {
     pub(crate) account: String,
-    pub(crate) amount: f64,
+    pub(crate) amount: Money,
+    pub(crate) currency: String,
 }
 #[derive(Debug, Clone)]
 pub(crate) struct Transaction {
@@ -20,33 +22,45 @@ pub(crate) struct Transaction {
 pub struct LedgerSummary {
     pub status: String,
     pub diagnostics: Vec<String>,
-    pub net_worth: f64,
-    pub total_assets: f64,
-    pub total_liabilities: f64,
-    pub bank_accounts: BTreeMap<String, f64>,
-    pub retirement: BTreeMap<String, f64>,
-    pub investments: BTreeMap<String, f64>,
-    pub credit_cards: BTreeMap<String, f64>,
-    pub housing: f64,
-    pub cash: f64,
+    pub currency: String,
+    pub selected_currency: String,
+    pub excluded_currencies: Vec<String>,
+    pub unvalued_units: Vec<String>,
+    pub totals_by_currency: BTreeMap<String, CurrencyTotals>,
+    pub net_worth: Money,
+    pub total_assets: Money,
+    pub total_liabilities: Money,
+    pub bank_accounts: BTreeMap<String, Money>,
+    pub retirement: BTreeMap<String, Money>,
+    pub investments: BTreeMap<String, Money>,
+    pub credit_cards: BTreeMap<String, Money>,
+    pub housing: Money,
+    pub cash: Money,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct CurrencyTotals {
+    pub total_assets: Money,
+    pub total_liabilities: Money,
+    pub net_worth: Money,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct HistorySnapshot {
     pub name: String,
+    pub currency: String,
     #[serde(rename = "Net Worth")]
-    pub net_worth: f64,
+    pub net_worth: Money,
     #[serde(rename = "401k")]
-    pub retirement_401k: f64,
+    pub retirement_401k: Money,
     #[serde(rename = "IRA Primary")]
-    pub ira_primary: f64,
+    pub ira_primary: Money,
     #[serde(rename = "IRA Secondary")]
-    pub ira_secondary: f64,
+    pub ira_secondary: Money,
     #[serde(rename = "Stocks")]
-    pub stocks: f64,
+    pub stocks: Money,
     #[serde(rename = "Stocks Secondary")]
-    pub stocks_secondary: f64,
+    pub stocks_secondary: Money,
     #[serde(rename = "HSA")]
-    pub hsa: f64,
+    pub hsa: Money,
 }
 #[derive(Debug, Serialize)]
 pub struct LedgerTransaction {
@@ -54,7 +68,8 @@ pub struct LedgerTransaction {
     pub payee: String,
     pub narration: String,
     pub account: String,
-    pub amount: f64,
+    pub amount: Money,
+    pub currency: String,
 }
 
 fn read_ledger_path(path: &str) -> Result<String, String> {
@@ -154,7 +169,7 @@ fn header(line: &str) -> Option<(String, String, String)> {
 fn location(line: usize, msg: &str) -> String {
     format!("line {line}: {msg}")
 }
-fn plain_decimal(s: &str) -> Option<f64> {
+fn plain_decimal(s: &str) -> Option<Money> {
     let body = s
         .strip_prefix('-')
         .or_else(|| s.strip_prefix('+'))
@@ -173,9 +188,7 @@ fn plain_decimal(s: &str) -> Option<f64> {
     if digits == 0 {
         return None;
     }
-    s.parse::<f64>()
-        .ok()
-        .filter(|v| v.is_finite() && v.abs() <= 1.0e15)
+    Money::parse(s).ok()
 }
 fn parse_with_currency(contents: &str, currency: &str) -> Result<Vec<Transaction>, Vec<String>> {
     let lines: Vec<_> = contents.lines().collect();
@@ -183,12 +196,13 @@ fn parse_with_currency(contents: &str, currency: &str) -> Result<Vec<Transaction
     let mut errs = vec![];
     let mut i = 0;
     let mut seen_directive = false;
-    let mut totals: BTreeMap<String, f64> = BTreeMap::new();
-    let mut ledger_magnitude = 0.0;
-    if currency != "USD" {
+    let mut totals: BTreeMap<(String, String), Money> = BTreeMap::new();
+    let mut ledger_magnitude = Money::default();
+    let max_movement = Money::from_scaled(Money::MAX).expect("MAX is within i128");
+    if !valid_currency(currency) {
         return Err(vec![location(
             1,
-            "unsupported ledger_currency; only USD is supported until currency-aware presentation is implemented",
+            "ledger_currency must be an uppercase unit token",
         )]);
     }
     while i < lines.len() {
@@ -238,7 +252,7 @@ fn parse_with_currency(contents: &str, currency: &str) -> Result<Vec<Transaction
                     if fields.len() < 2
                         || fields.len() > 3
                         || !account_ok(fields[1])
-                        || (fields.len() == 3 && fields[2] != currency)
+                        || (fields.len() == 3 && !valid_currency(fields[2]))
                     {
                         errs.push(location(i+1,"invalid open directive; expected YYYY-MM-DD open ACCOUNT [LEDGER_CURRENCY]"))
                     }
@@ -256,8 +270,8 @@ fn parse_with_currency(contents: &str, currency: &str) -> Result<Vec<Transaction
             if let Some((date, payee, narration)) = header(line) {
                 let start = i + 1;
                 let mut posts = vec![];
-                let mut sum = 0.0;
-                let mut magnitude = 0.0;
+                let mut sums: BTreeMap<String, Money> = BTreeMap::new();
+                let mut magnitude = Money::default();
                 i += 1;
                 while i < lines.len()
                     && ((lines[i].starts_with(' ') || lines[i].starts_with('\t'))
@@ -282,25 +296,49 @@ fn parse_with_currency(contents: &str, currency: &str) -> Result<Vec<Transaction
                         i += 1;
                         continue;
                     }
-                    if f.len() == 3 && f[2] != currency {
-                        errs.push(location(ln, "posting currency must match ledger_currency"));
+                    if f.len() == 3 && !valid_currency(f[2]) {
+                        errs.push(location(
+                            ln,
+                            "posting currency must be an uppercase unit token",
+                        ));
                         i += 1;
                         continue;
                     }
                     let amount = plain_decimal(f[1]);
                     if let Some(a) = amount {
-                        sum += a;
-                        magnitude += a.abs();
-                        ledger_magnitude += a.abs();
-                        let total = totals.entry(f[0].into()).or_insert(0.0);
-                        *total += a;
-                        if !sum.is_finite()
-                            || !magnitude.is_finite()
-                            || !ledger_magnitude.is_finite()
-                            || !total.is_finite()
-                            || magnitude > 1.0e15
-                            || ledger_magnitude > 1.0e15
-                            || total.abs() > 1.0e15
+                        let currency_unit = f[2].to_string();
+                        let sum = sums.entry(currency_unit.clone()).or_default();
+                        let Some(next_sum) = sum.checked_add(a) else {
+                            errs.push(location(ln, "currency transaction sum overflow"));
+                            i += 1;
+                            continue;
+                        };
+                        *sum = next_sum;
+                        let Some(next_magnitude) = magnitude.checked_add(a.abs()) else {
+                            errs.push(location(ln, "transaction movement overflow"));
+                            i += 1;
+                            continue;
+                        };
+                        let Some(next_ledger_magnitude) = ledger_magnitude.checked_add(a.abs())
+                        else {
+                            errs.push(location(ln, "ledger movement overflow"));
+                            i += 1;
+                            continue;
+                        };
+                        magnitude = next_magnitude;
+                        ledger_magnitude = next_ledger_magnitude;
+                        let total = totals
+                            .entry((f[0].into(), currency_unit.clone()))
+                            .or_default();
+                        let Some(next_total) = total.checked_add(a) else {
+                            errs.push(location(ln, "account amount overflow"));
+                            i += 1;
+                            continue;
+                        };
+                        *total = next_total;
+                        if magnitude > max_movement
+                            || ledger_magnitude > max_movement
+                            || total.abs() > max_movement
                         {
                             errs.push(location(
                                 ln,
@@ -310,6 +348,7 @@ fn parse_with_currency(contents: &str, currency: &str) -> Result<Vec<Transaction
                             posts.push(Posting {
                                 account: f[0].into(),
                                 amount: a,
+                                currency: currency_unit,
                             })
                         }
                     } else {
@@ -323,11 +362,10 @@ fn parse_with_currency(contents: &str, currency: &str) -> Result<Vec<Transaction
                         "transaction requires at least two explicit postings",
                     ))
                 }
-                let tolerance = 1e-8;
-                if sum.abs() > tolerance {
+                if sums.values().any(|sum| !sum.is_zero()) {
                     errs.push(location(
                         start,
-                        "transaction postings are not balanced within the documented f64 tolerance",
+                        "transaction postings are not balanced exactly for each unit",
                     ))
                 }
                 if errs.is_empty() {
@@ -366,74 +404,82 @@ fn parse_with_currency(contents: &str, currency: &str) -> Result<Vec<Transaction
     }
     Ok(txs)
 }
-fn account_balances(t: &[Transaction]) -> BTreeMap<String, f64> {
+pub(crate) fn valid_currency(s: &str) -> bool {
+    s.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
+        && s.bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-')
+}
+fn selected_unit_balances(t: &[Transaction], currency: &str) -> BTreeMap<String, Money> {
     let mut b = BTreeMap::new();
-    for x in t {
-        for p in &x.postings {
-            *b.entry(p.account.clone()).or_insert(0.0) += p.amount
+    for tx in t {
+        for p in &tx.postings {
+            if p.currency == currency {
+                *b.entry(p.account.clone()).or_default() += p.amount;
+            }
         }
     }
     b
 }
-fn subtree_total(b: &BTreeMap<String, f64>, p: &str) -> f64 {
+#[cfg(test)]
+fn account_balances(t: &[Transaction]) -> BTreeMap<String, Money> {
+    let mut b = BTreeMap::new();
+    for x in t {
+        for p in &x.postings {
+            *b.entry(p.account.clone()).or_default() += p.amount
+        }
+    }
+    b
+}
+fn subtree_total(b: &BTreeMap<String, Money>, p: &str) -> Money {
     b.iter()
         .filter(|(a, _)| *a == p || a.starts_with(&format!("{p}:")))
         .map(|(_, v)| *v)
-        .sum()
+        .fold(Money::default(), |a, v| a + v)
 }
-fn leaf_balances(b: &BTreeMap<String, f64>, p: &str) -> BTreeMap<String, f64> {
+fn leaf_balances(b: &BTreeMap<String, Money>, p: &str) -> BTreeMap<String, Money> {
     let desc: BTreeSet<&str> = b
         .keys()
         .filter_map(|a| a.starts_with(&format!("{p}:")).then_some(a.as_str()))
         .collect();
     b.iter()
         .filter(|(a, v)| {
-            **v != 0.0
+            !v.is_zero()
                 && (**a == p || a.starts_with(&format!("{p}:")))
                 && !desc.iter().any(|d| d.starts_with(&format!("{a}:")))
         })
-        .map(|(a, v)| {
-            (
-                a.strip_prefix(&format!("{p}:")).unwrap_or(a).into(),
-                round(*v),
-            )
-        })
+        .map(|(a, v)| (a.strip_prefix(&format!("{p}:")).unwrap_or(a).into(), *v))
         .collect()
 }
-fn round(v: f64) -> f64 {
-    (v * 100.0).round() / 100.0
-}
-fn history_snapshot(name: String, balances: &BTreeMap<String, f64>) -> HistorySnapshot {
+fn history_snapshot(
+    name: String,
+    balances: &BTreeMap<String, Money>,
+    currency: &str,
+) -> HistorySnapshot {
     let net_worth = balances
         .iter()
         .filter(|(account, _)| account.starts_with("Assets") || account.starts_with("Liabilities"))
         .map(|(_, amount)| amount)
-        .sum();
+        .fold(Money::default(), |a, v| a + *v);
     HistorySnapshot {
         name,
-        net_worth: round(net_worth),
-        retirement_401k: round(
-            *balances
-                .get(crate::config::get("retirement_401k_account"))
-                .unwrap_or(&0.0),
-        ),
-        ira_primary: round(
-            *balances
-                .get(crate::config::get("ira_primary_account"))
-                .unwrap_or(&0.0),
-        ),
-        ira_secondary: round(
-            *balances
-                .get(crate::config::get("ira_secondary_account"))
-                .unwrap_or(&0.0),
-        ),
-        stocks: round(*balances.get("Assets:Investments:Stocks").unwrap_or(&0.0)),
-        stocks_secondary: round(
-            *balances
-                .get(crate::config::get("stocks_secondary_account"))
-                .unwrap_or(&0.0),
-        ),
-        hsa: round(subtree_total(balances, "Assets:Retirement:HSA")),
+        currency: currency.to_string(),
+        net_worth,
+        retirement_401k: *balances
+            .get(crate::config::get("retirement_401k_account"))
+            .unwrap_or(&Money::default()),
+        ira_primary: *balances
+            .get(crate::config::get("ira_primary_account"))
+            .unwrap_or(&Money::default()),
+        ira_secondary: *balances
+            .get(crate::config::get("ira_secondary_account"))
+            .unwrap_or(&Money::default()),
+        stocks: *balances
+            .get("Assets:Investments:Stocks")
+            .unwrap_or(&Money::default()),
+        stocks_secondary: *balances
+            .get(crate::config::get("stocks_secondary_account"))
+            .unwrap_or(&Money::default()),
+        hsa: subtree_total(balances, "Assets:Retirement:HSA"),
     }
 }
 fn next_month(month: &str) -> String {
@@ -445,16 +491,27 @@ fn next_month(month: &str) -> String {
         format!("{year:04}-{:02}", month_number + 1)
     }
 }
-fn history_from_transactions(transactions: &[Transaction]) -> Vec<HistorySnapshot> {
+fn history_from_transactions_for_currency(
+    transactions: &[Transaction],
+    currency: &str,
+) -> Vec<HistorySnapshot> {
+    let transactions: Vec<Transaction> = transactions
+        .iter()
+        .flat_map(|tx| {
+            let mut copy = tx.clone();
+            copy.postings.retain(|p| p.currency == currency);
+            std::iter::once(copy)
+        })
+        .collect();
     let mut balances = BTreeMap::new();
     let mut monthly = BTreeMap::new();
     for transaction in transactions {
         for posting in &transaction.postings {
-            *balances.entry(posting.account.clone()).or_insert(0.0) += posting.amount;
+            *balances.entry(posting.account.clone()).or_default() += posting.amount;
         }
         monthly.insert(
             transaction.date[..7].to_string(),
-            history_snapshot(transaction.date[..7].to_string(), &balances),
+            history_snapshot(transaction.date[..7].to_string(), &balances, currency),
         );
     }
     let Some(first) = monthly.keys().next().cloned() else {
@@ -482,6 +539,69 @@ fn history_from_transactions(transactions: &[Transaction]) -> Vec<HistorySnapsho
         .rev()
         .collect()
 }
+fn history_from_transactions(transactions: &[Transaction]) -> Vec<HistorySnapshot> {
+    history_from_transactions_for_currency(transactions, crate::config::get("ledger_currency"))
+}
+fn currency_totals(transactions: &[Transaction]) -> BTreeMap<String, CurrencyTotals> {
+    let units: BTreeSet<String> = transactions
+        .iter()
+        .flat_map(|t| t.postings.iter().map(|p| p.currency.clone()))
+        .collect();
+    units
+        .into_iter()
+        .map(|unit| {
+            let balances = selected_unit_balances(transactions, &unit);
+            let assets = subtree_total(&balances, "Assets");
+            let liabilities = subtree_total(&balances, "Liabilities");
+            (
+                unit,
+                CurrencyTotals {
+                    total_assets: assets,
+                    total_liabilities: liabilities,
+                    net_worth: assets + liabilities,
+                },
+            )
+        })
+        .collect()
+}
+fn summary_from_transactions_for_currency(
+    transactions: &[Transaction],
+    selected: &str,
+) -> LedgerSummary {
+    let balances = selected_unit_balances(transactions, selected);
+    let assets = subtree_total(&balances, "Assets");
+    let liabilities = subtree_total(&balances, "Liabilities");
+    let units = transactions
+        .iter()
+        .flat_map(|t| t.postings.iter().map(|p| p.currency.clone()))
+        .collect::<BTreeSet<_>>();
+    LedgerSummary {
+        status: "validated".into(),
+        diagnostics: vec![],
+        currency: selected.into(),
+        selected_currency: selected.into(),
+        excluded_currencies: units
+            .iter()
+            .filter(|u| u.as_str() != selected)
+            .cloned()
+            .collect(),
+        unvalued_units: units
+            .iter()
+            .filter(|u| u.as_str() != selected)
+            .cloned()
+            .collect(),
+        totals_by_currency: currency_totals(transactions),
+        net_worth: assets + liabilities,
+        total_assets: assets,
+        total_liabilities: liabilities,
+        bank_accounts: leaf_balances(&balances, "Assets:Bank"),
+        retirement: leaf_balances(&balances, "Assets:Retirement"),
+        investments: leaf_balances(&balances, "Assets:Investments"),
+        credit_cards: leaf_balances(&balances, "Liabilities:CreditCard"),
+        housing: subtree_total(&balances, "Assets:Housing"),
+        cash: subtree_total(&balances, "Assets:Cash"),
+    }
+}
 pub(crate) fn validated_transactions() -> Result<Vec<Transaction>, String> {
     let path = crate::config::get("ledger_path");
     validated_transactions_from_path(path, crate::config::get("ledger_currency"))
@@ -507,22 +627,8 @@ fn validated_transactions_from_path(
 #[tauri::command]
 pub fn get_ledger_summary() -> Result<LedgerSummary, String> {
     let t = validated_transactions()?;
-    let b = account_balances(&t);
-    let a = subtree_total(&b, "Assets");
-    let l = subtree_total(&b, "Liabilities");
-    Ok(LedgerSummary {
-        status: "validated".into(),
-        diagnostics: vec![],
-        net_worth: round(a + l),
-        total_assets: round(a),
-        total_liabilities: round(l),
-        bank_accounts: leaf_balances(&b, "Assets:Bank"),
-        retirement: leaf_balances(&b, "Assets:Retirement"),
-        investments: leaf_balances(&b, "Assets:Investments"),
-        credit_cards: leaf_balances(&b, "Liabilities:CreditCard"),
-        housing: round(subtree_total(&b, "Assets:Housing")),
-        cash: round(subtree_total(&b, "Assets:Cash")),
-    })
+    let selected = crate::config::get("ledger_currency");
+    Ok(summary_from_transactions_for_currency(&t, selected))
 }
 #[tauri::command]
 pub fn get_ledger_history() -> Result<Vec<HistorySnapshot>, String> {
@@ -543,6 +649,7 @@ pub fn get_ledger_transactions(prefix: String) -> Result<Vec<LedgerTransaction>,
                     narration: x.narration.clone(),
                     account: p.account,
                     amount: p.amount,
+                    currency: p.currency,
                 })
         })
         .collect::<Vec<_>>();
@@ -569,7 +676,10 @@ mod strict_subset_tests {
         let tx = parse_with_currency(ledger, "USD").unwrap();
         assert_eq!(tx[0].payee, "Shop");
         assert_eq!(tx[0].narration, "Food");
-        assert_eq!(account_balances(&tx).get("Assets:Bank"), Some(&-25.5));
+        assert_eq!(
+            account_balances(&tx).get("Assets:Bank"),
+            Some(&Money::parse("-25.5").unwrap())
+        );
     }
     #[test]
     fn rejects_semantic_malformed_and_unsupported_entries() {
@@ -594,7 +704,6 @@ mod strict_subset_tests {
             "2024-01-01 * \"x\"\n  Assets:Bank 1e999\n  Expenses:Food -1e999\n",
             "2024-01-01 * \"x\"\n  Assets:Bank 1e2 USD\n  Expenses:Food -1e2 USD\n",
             "2024-01-01 * \"x\"\n  Assets:Bank -1\n  Expenses:Food 2\n",
-            "2024-01-01 * \"x\"\n  Assets:Bank -1 CAD\n  Expenses:Food 1 CAD\n",
             "2024-01-01 * \"x\"\n  Assets:Bank -1 USD {2 USD}\n  Expenses:Food 1 USD\n",
             "2024-01-01 * \"x\"\n  Assets:Bank 1.0 USD {2 USD}\n  Expenses:Food -1.0 USD\n",
             "2024-01-01 * \"x\"\n  Assets:Bank -1 USD\n  Expenses:Food 1 EUR\n",
@@ -608,12 +717,12 @@ mod strict_subset_tests {
         bad("2024-01-01 * \"x\"\n  Assets:Bank -1\n  Expenses:Food 1\n2024-01-02 nonsense\n");
     }
     #[test]
-    fn mismatch_currency_rejected() {
+    fn nonselected_currency_is_accepted_and_balanced() {
         assert!(parse_with_currency(
             "2024-01-01 * \"x\"\n  Assets:Bank -1 EUR\n  Expenses:Food 1 EUR\n",
             "USD"
         )
-        .is_err())
+        .is_ok())
     }
     #[test]
     fn history_carries_forward_empty_months() {
@@ -625,11 +734,13 @@ mod strict_subset_tests {
                 postings: vec![
                     Posting {
                         account: "Assets:Bank".into(),
-                        amount: 10.0,
+                        currency: "USD".into(),
+                        amount: Money::parse("10").unwrap(),
                     },
                     Posting {
                         account: "Equity:Opening".into(),
-                        amount: -10.0,
+                        currency: "USD".into(),
+                        amount: Money::parse("-10").unwrap(),
                     },
                 ],
             },
@@ -640,11 +751,13 @@ mod strict_subset_tests {
                 postings: vec![
                     Posting {
                         account: "Assets:Bank".into(),
-                        amount: 5.0,
+                        currency: "USD".into(),
+                        amount: Money::parse("5").unwrap(),
                     },
                     Posting {
                         account: "Equity:Opening".into(),
-                        amount: -5.0,
+                        currency: "USD".into(),
+                        amount: Money::parse("-5").unwrap(),
                     },
                 ],
             },
@@ -652,9 +765,9 @@ mod strict_subset_tests {
         let history = history_from_transactions(&transactions);
         assert_eq!(history.len(), 3);
         assert_eq!(history[1].name, "2024-01");
-        assert_eq!(history[0].net_worth, 10.0);
-        assert_eq!(history[1].net_worth, 10.0);
-        assert_eq!(history[2].net_worth, 15.0);
+        assert_eq!(history[0].net_worth, Money::parse("10").unwrap());
+        assert_eq!(history[1].net_worth, Money::parse("10").unwrap());
+        assert_eq!(history[2].net_worth, Money::parse("15").unwrap());
     }
     #[test]
     fn fixed_tolerance_accepts_decimal_split_and_rejects_large_imbalance() {
@@ -669,10 +782,71 @@ mod strict_subset_tests {
         );
     }
     #[test]
-    fn configured_currency_is_usd_only() {
+    fn configured_currency_can_be_non_usd() {
         let euro = "2024-01-01 * \"euro\"\n  Assets:Bank -1 EUR\n  Expenses:Food 1 EUR\n";
-        let errors = parse_with_currency(euro, "EUR").unwrap_err().join("; ");
-        assert!(errors.contains("only USD is supported"), "{errors}");
+        assert!(parse_with_currency(euro, "EUR").is_ok());
+    }
+    #[test]
+    fn mixed_units_balance_independently_and_summary_keeps_zero_net_holdings() {
+        let ledger = "2024-01-01 * \"units\"\n  Assets:Bank 10 USD\n  Equity:Opening -10 USD\n  Assets:Bank 10 EUR\n  Equity:Opening -10 EUR\n";
+        let tx = parse_with_currency(ledger, "EUR").unwrap();
+        assert_eq!(
+            selected_unit_balances(&tx, "EUR").get("Assets:Bank"),
+            Some(&Money::parse("10").unwrap())
+        );
+        let totals = currency_totals(&tx);
+        assert_eq!(totals["USD"].total_assets, Money::parse("10").unwrap());
+        assert_eq!(totals["EUR"].total_assets, Money::parse("10").unwrap());
+        assert_eq!(
+            history_from_transactions_for_currency(&tx, "EUR")[0].currency,
+            "EUR"
+        );
+        assert!(parse_with_currency(
+            "2024-01-01 * \"bad\"\n  Assets:Bank -10 USD\n  Expenses:Food 10 EUR\n",
+            "USD"
+        )
+        .is_err());
+    }
+    #[test]
+    fn production_summary_preserves_exact_selected_unit_and_serializes_money_as_strings() {
+        let ledger = "2024-01-01 * \"units\"\n  Assets:Bank 1 EUR\n  Equity:Opening -1 EUR\n  Assets:Investments:VTI 9 VTI\n  Equity:Opening -9 VTI\n  Assets:Bank 1 USD\n  Equity:Opening -1 USD\n2024-01-02 * \"fractional\"\n  Assets:Bank 0.0001 USD\n  Equity:Opening -0.0001 USD\n2024-01-03 * \"refund\"\n  Assets:Bank -2 USD\n  Liabilities:CreditCard 2 USD\n";
+        let tx = parse_with_currency(ledger, "EUR").unwrap();
+        let summary = summary_from_transactions_for_currency(&tx, "EUR");
+        assert_eq!(summary.total_assets.to_string(), "1");
+        assert_eq!(summary.currency, "EUR");
+        assert_eq!(
+            summary.totals_by_currency["USD"].total_assets.to_string(),
+            "-0.9999"
+        );
+        assert_eq!(
+            summary.totals_by_currency["VTI"].total_assets.to_string(),
+            "9"
+        );
+        assert!(summary.unvalued_units.contains(&"VTI".to_string()));
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["total_assets"], "1");
+        assert_eq!(
+            serde_json::to_value(history_from_transactions_for_currency(&tx, "EUR")[0].clone())
+                .unwrap()["Net Worth"],
+            "1"
+        );
+        assert_eq!(
+            summary.totals_by_currency["USD"].net_worth.to_string(),
+            "1.0001"
+        );
+    }
+    #[test]
+    fn numerically_cancelling_mixed_units_are_rejected_with_source_line() {
+        let err = parse_with_currency(
+            "2024-01-01 * \"bad\"\n  Assets:Bank 10 USD\n  Expenses:Food -10 EUR\n",
+            "USD",
+        )
+        .unwrap_err()
+        .join("; ");
+        assert!(
+            err.contains("line 1: transaction postings are not balanced exactly for each unit"),
+            "{err}"
+        );
     }
     #[test]
     fn validates_file_status_contract_without_real_ledger_paths() {

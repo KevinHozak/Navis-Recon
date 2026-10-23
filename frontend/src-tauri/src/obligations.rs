@@ -5,6 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::ledger_parser::{validated_transactions, Transaction};
+use crate::money::Money;
 
 /// Cadence classifications for recurring obligations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -50,6 +51,8 @@ pub struct SubscriptionMetadata {
     pub key: String,
     pub payee: String,
     pub account: String,
+    #[serde(default = "default_currency")]
+    pub currency: String,
     #[serde(default)]
     pub billing_method: Option<String>,
     #[serde(default)]
@@ -67,6 +70,9 @@ pub struct SubscriptionMetadata {
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
+fn default_currency() -> String {
+    "USD".to_string()
+}
 
 /// Top-level payload stored in `subscriptions.json`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -80,10 +86,12 @@ pub struct SubscriptionRegistryPayload {
 /// Price delta metrics comparing the most recent charge against the rolling median baseline.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PriceDelta {
-    pub latest_amount: f64,
-    pub median_amount: f64,
-    pub dollar_delta: f64,
-    pub percentage_delta: f64,
+    pub currency: String,
+    pub latest_amount: Money,
+    pub median_amount: Money,
+    pub dollar_delta: Money,
+    pub percentage_delta: Option<Money>,
+    pub percentage_is_estimate: bool,
     pub is_increase: bool,
 }
 
@@ -111,10 +119,13 @@ pub struct RecurringObligation {
     pub key: String,
     pub payee: String,
     pub account: String,
+    pub currency: String,
     pub cadence: RecurrenceCadence,
-    pub latest_amount: f64,
-    pub median_amount: f64,
-    pub mean_amount: f64,
+    pub latest_amount: Money,
+    pub median_amount: Money,
+    pub mean_amount: Money,
+    pub median_is_estimate: bool,
+    pub mean_is_estimate: bool,
     pub price_delta: Option<PriceDelta>,
     pub alerts: Vec<RenewalAlert>,
     pub median_interval_days: i32,
@@ -128,6 +139,9 @@ pub struct RecurringObligation {
 /// Standard canonical key generator for an obligation: `"<payee>::<account>"`.
 pub fn obligation_key(payee: &str, account: &str) -> String {
     format!("{}::{}", payee.trim(), account.trim())
+}
+pub fn obligation_currency_key(payee: &str, account: &str, currency: &str) -> String {
+    format!("{}::{}::{}", payee.trim(), account.trim(), currency.trim())
 }
 
 /// Parse YYYY-MM-DD into (year, month, day).
@@ -227,10 +241,6 @@ pub fn add_months(date_str: &str, months: i32) -> Option<String> {
     Some(format!("{:04}-{:02}-{:02}", ny, nm, nd))
 }
 
-fn round2(value: f64) -> f64 {
-    (value * 100.0).round() / 100.0
-}
-
 fn read_utf8_sig(path: &Path) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|error| format!("failed to read file: {error}"))?;
     let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
@@ -324,21 +334,31 @@ pub fn save_subscription_registry(
     write_atomic(path, &bytes)
 }
 
-/// Analyzes price delta and checks for significant price increases (>= $0.50 and >= 2.0%).
-pub fn compute_price_delta(latest_amount: f64, median_amount: f64) -> Option<PriceDelta> {
-    let dollar_delta = round2(latest_amount - median_amount);
-    let percentage_delta = if median_amount > 0.001 {
-        round2((dollar_delta / median_amount) * 100.0)
+/// Analyzes price delta and checks for significant price increases (>= 0.50 currency units and >= 2.0%).
+pub fn compute_price_delta(
+    latest_amount: Money,
+    median_amount: Money,
+    currency: &str,
+) -> Option<PriceDelta> {
+    let dollar_delta = latest_amount - median_amount;
+    let percentage_delta = if median_amount > Money::default() {
+        Money::ratio_percent(dollar_delta, median_amount)
     } else {
-        0.0
+        None
     };
-    let is_increase = dollar_delta >= 0.50 && percentage_delta >= 2.0;
+    let is_increase = median_amount > Money::default()
+        && dollar_delta >= Money::parse("0.50").ok()?
+        && dollar_delta.at_least_ratio(median_amount, 2, 100);
 
     Some(PriceDelta {
-        latest_amount: round2(latest_amount),
-        median_amount: round2(median_amount),
+        currency: currency.to_string(),
+        latest_amount,
+        median_amount,
         dollar_delta,
         percentage_delta,
+        percentage_is_estimate: percentage_delta.is_some_and(|_| {
+            median_amount > Money::default() && !Money::ratio_is_exact(dollar_delta, median_amount)
+        }),
         is_increase,
     })
 }
@@ -414,10 +434,16 @@ pub fn evaluate_renewal_alerts(
         if delta.is_increase {
             alerts.push(RenewalAlert {
                 kind: RenewalAlertKind::PriceHike,
-                message: format!(
-                    "Price increased by ${:.2} (+{:.1}%) above median baseline",
-                    delta.dollar_delta, delta.percentage_delta
-                ),
+                message: match delta.percentage_delta {
+                    Some(percentage) => format!(
+                        "Price increased by {} {} (+{}%) above median baseline",
+                        delta.dollar_delta, delta.currency, percentage
+                    ),
+                    None => format!(
+                        "Price increased by {} {} (percentage unavailable) above median baseline",
+                        delta.dollar_delta, delta.currency
+                    ),
+                },
                 days_until: None,
             });
         }
@@ -454,7 +480,7 @@ pub fn analyze_recurring_obligations_with_registry(
         .collect();
 
     // Collect all chronological postings to Expenses:*
-    let mut all_expense_postings: Vec<(String, String, String, f64)> = Vec::new();
+    let mut all_expense_postings: Vec<(String, String, String, String, Money)> = Vec::new();
     let mut latest_date_in_ledger = String::new();
 
     for tx in transactions {
@@ -467,6 +493,7 @@ pub fn analyze_recurring_obligations_with_registry(
                     tx.date.clone(),
                     tx.payee.clone(),
                     posting.account.clone(),
+                    posting.currency.clone(),
                     posting.amount,
                 ));
             }
@@ -489,23 +516,23 @@ pub fn analyze_recurring_obligations_with_registry(
     };
 
     // Group postings by (payee, account)
-    let mut groups: BTreeMap<(String, String), Vec<(String, f64)>> = BTreeMap::new();
-    for (d, p, a, amt) in &all_expense_postings {
+    let mut groups: BTreeMap<(String, String, String), Vec<(String, Money)>> = BTreeMap::new();
+    for (d, p, a, c, amt) in &all_expense_postings {
         groups
-            .entry((p.clone(), a.clone()))
+            .entry((p.clone(), a.clone(), c.clone()))
             .or_default()
             .push((d.clone(), *amt));
     }
 
     let mut obligations = Vec::new();
 
-    for ((payee, account), mut txs) in groups {
+    for ((payee, account, currency), mut txs) in groups {
         txs.sort_by(|a, b| a.0.cmp(&b.0));
         let last_date = txs.last().unwrap().0.clone();
         let latest_amount = txs.last().unwrap().1;
 
         // Must have at least 1 posting in the trailing 12-month window
-        let t12_postings: Vec<(String, f64)> = txs
+        let t12_postings: Vec<(String, Money)> = txs
             .iter()
             .filter(|(d, _)| d.as_str() >= t12_cutoff.as_str() && d.as_str() <= anchor_date)
             .cloned()
@@ -570,20 +597,36 @@ pub fn analyze_recurring_obligations_with_registry(
         };
 
         if let Some(cad) = cadence {
-            let mut t12_amts: Vec<f64> = t12_postings.iter().map(|(_, a)| *a).collect();
-            t12_amts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let median_amount = if t12_amts.len() % 2 == 1 {
-                t12_amts[t12_amts.len() / 2]
+            let mut t12_amts: Vec<Money> = t12_postings.iter().map(|(_, a)| *a).collect();
+            t12_amts.sort();
+            let (median_amount, median_is_estimate) = if t12_amts.len() % 2 == 1 {
+                (t12_amts[t12_amts.len() / 2], false)
             } else {
                 let mid = t12_amts.len() / 2;
-                (t12_amts[mid - 1] + t12_amts[mid]) / 2.0
+                let sum = t12_amts[mid - 1] + t12_amts[mid];
+                (sum.rounded_div(2).unwrap(), sum.checked_div(2).is_none())
             };
-            let mean_amount = t12_amts.iter().sum::<f64>() / t12_amts.len() as f64;
+            let mean_sum = t12_amts
+                .iter()
+                .copied()
+                .fold(Money::default(), |a, b| a + b);
+            let mean_amount = mean_sum.rounded_div(t12_amts.len() as i128).unwrap();
+            let mean_is_estimate = mean_sum.checked_div(t12_amts.len() as i128).is_none();
 
             if let Some(next_projected_date) = cad.project_next(&last_date) {
-                let key = obligation_key(&payee, &account);
-                let metadata = registry_map.get(&key).cloned();
-                let price_delta = compute_price_delta(latest_amount, median_amount);
+                let key = obligation_currency_key(&payee, &account, &currency);
+                let metadata = registry_map
+                    .get(&key)
+                    .or_else(|| {
+                        if currency == "USD" {
+                            registry_map.get(&obligation_key(&payee, &account))
+                        } else {
+                            None
+                        }
+                    })
+                    .filter(|meta| meta.currency == currency)
+                    .cloned();
+                let price_delta = compute_price_delta(latest_amount, median_amount, &currency);
                 let alerts = evaluate_renewal_alerts(
                     cad,
                     anchor_date,
@@ -596,10 +639,13 @@ pub fn analyze_recurring_obligations_with_registry(
                     key,
                     payee,
                     account,
+                    currency,
                     cadence: cad,
-                    latest_amount: round2(latest_amount),
-                    median_amount: round2(median_amount),
-                    mean_amount: round2(mean_amount),
+                    latest_amount,
+                    median_amount,
+                    mean_amount,
+                    median_is_estimate,
+                    mean_is_estimate,
                     price_delta,
                     alerts,
                     median_interval_days: median_interval,
@@ -663,7 +709,7 @@ pub fn save_subscription_metadata(metadata: SubscriptionMetadata) -> Result<(), 
     // Normalize metadata key if blank
     let mut entry = metadata;
     if entry.key.is_empty() {
-        entry.key = obligation_key(&entry.payee, &entry.account);
+        entry.key = obligation_currency_key(&entry.payee, &entry.account, &entry.currency);
     }
 
     if let Some(existing) = payload
@@ -694,6 +740,143 @@ pub fn save_subscription_registry_payload(
 mod tests {
     use super::*;
     use crate::ledger_parser::Posting;
+
+    #[test]
+    fn recurring_obligations_are_grouped_by_currency_and_keep_currency_keys() {
+        let mut txs = Vec::new();
+        for (date, usd, eur) in [
+            ("2026-01-01", "10", "20"),
+            ("2026-02-01", "10", "20"),
+            ("2026-03-01", "10", "20"),
+        ] {
+            txs.push(Transaction {
+                date: date.into(),
+                payee: "Service".into(),
+                narration: "".into(),
+                postings: vec![
+                    Posting {
+                        account: "Expenses:Services:Monthly".into(),
+                        currency: "USD".into(),
+                        amount: Money::parse(usd).unwrap(),
+                    },
+                    Posting {
+                        account: "Expenses:Services:Monthly".into(),
+                        currency: "EUR".into(),
+                        amount: Money::parse(eur).unwrap(),
+                    },
+                ],
+            });
+        }
+        let items = analyze_recurring_obligations(&txs, Some("2026-03-15"));
+        assert_eq!(items.len(), 2);
+        assert!(items
+            .iter()
+            .any(|x| x.key == "Service::Expenses:Services:Monthly::USD"
+                && x.median_amount == Money::parse("10").unwrap()));
+        assert!(items
+            .iter()
+            .any(|x| x.key == "Service::Expenses:Services:Monthly::EUR"
+                && x.median_amount == Money::parse("20").unwrap()));
+    }
+
+    #[test]
+    fn metadata_matches_only_its_currency_and_legacy_keys_remain_usd_only() {
+        let mut txs = Vec::new();
+        for date in ["2026-01-01", "2026-02-01", "2026-03-01"] {
+            txs.push(Transaction {
+                date: date.into(),
+                payee: "Service".into(),
+                narration: "".into(),
+                postings: vec![
+                    Posting {
+                        account: "Expenses:Services:Monthly".into(),
+                        currency: "USD".into(),
+                        amount: Money::parse("10").unwrap(),
+                    },
+                    Posting {
+                        account: "Expenses:Services:Monthly".into(),
+                        currency: "EUR".into(),
+                        amount: Money::parse("20").unwrap(),
+                    },
+                ],
+            });
+        }
+        let usd_meta = SubscriptionMetadata {
+            key: obligation_key("Service", "Expenses:Services:Monthly"),
+            payee: "Service".into(),
+            account: "Expenses:Services:Monthly".into(),
+            currency: "USD".into(),
+            notes: Some("legacy USD".into()),
+            ..Default::default()
+        };
+        let eur_meta = SubscriptionMetadata {
+            key: obligation_currency_key("Service", "Expenses:Services:Monthly", "EUR"),
+            payee: "Service".into(),
+            account: "Expenses:Services:Monthly".into(),
+            currency: "EUR".into(),
+            notes: Some("explicit EUR".into()),
+            ..Default::default()
+        };
+        let registry = SubscriptionRegistryPayload {
+            subscriptions: vec![usd_meta.clone(), eur_meta.clone()],
+            ..Default::default()
+        };
+        let items =
+            analyze_recurring_obligations_with_registry(&txs, Some("2026-03-15"), &registry);
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items
+                .iter()
+                .find(|x| x.currency == "USD")
+                .unwrap()
+                .metadata
+                .as_ref()
+                .unwrap()
+                .notes
+                .as_deref(),
+            Some("legacy USD")
+        );
+        assert_eq!(
+            items
+                .iter()
+                .find(|x| x.currency == "EUR")
+                .unwrap()
+                .metadata
+                .as_ref()
+                .unwrap()
+                .notes
+                .as_deref(),
+            Some("explicit EUR")
+        );
+        let no_eur = SubscriptionRegistryPayload {
+            subscriptions: vec![usd_meta],
+            ..Default::default()
+        };
+        let items = analyze_recurring_obligations_with_registry(&txs, Some("2026-03-15"), &no_eur);
+        assert!(items
+            .iter()
+            .find(|x| x.currency == "EUR")
+            .unwrap()
+            .metadata
+            .is_none());
+        let mismatch = SubscriptionRegistryPayload {
+            subscriptions: vec![SubscriptionMetadata {
+                currency: "USD".into(),
+                ..eur_meta
+            }],
+            ..Default::default()
+        };
+        let items =
+            analyze_recurring_obligations_with_registry(&txs, Some("2026-03-15"), &mismatch);
+        assert!(items.iter().all(|x| x.metadata.is_none()));
+    }
+
+    #[test]
+    fn even_money_median_rounding_is_explicit_at_fixed_scale() {
+        let low = Money::default();
+        let high = Money::parse("0.000000000000000001").unwrap();
+        assert_eq!((low + high).rounded_div(2), Some(high));
+    }
 
     #[test]
     fn test_cadence_str() {
@@ -727,7 +910,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Tech:Subscriptions".to_string(),
-                    amount: 15.49,
+                    currency: "USD".to_string(),
+                    amount: Money::parse("15.49").unwrap(),
                 }],
             },
             Transaction {
@@ -736,7 +920,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Tech:Subscriptions".to_string(),
-                    amount: 15.49,
+                    currency: "USD".to_string(),
+                    amount: Money::parse("15.49").unwrap(),
                 }],
             },
             Transaction {
@@ -745,7 +930,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Tech:Subscriptions".to_string(),
-                    amount: 15.49,
+                    currency: "USD".to_string(),
+                    amount: Money::parse("15.49").unwrap(),
                 }],
             },
             Transaction {
@@ -754,7 +940,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Tech:Subscriptions".to_string(),
-                    amount: 15.49,
+                    currency: "USD".to_string(),
+                    amount: Money::parse("15.49").unwrap(),
                 }],
             },
         ];
@@ -762,12 +949,12 @@ mod tests {
         let obligations = analyze_recurring_obligations(&txs, Some("2026-04-30"));
         assert_eq!(obligations.len(), 1);
         let nflx = &obligations[0];
-        assert_eq!(nflx.key, "Netflix::Expenses:Tech:Subscriptions");
+        assert_eq!(nflx.key, "Netflix::Expenses:Tech:Subscriptions::USD");
         assert_eq!(nflx.payee, "Netflix");
         assert_eq!(nflx.account, "Expenses:Tech:Subscriptions");
         assert_eq!(nflx.cadence, RecurrenceCadence::Monthly);
-        assert_eq!(nflx.median_amount, 15.49);
-        assert_eq!(nflx.mean_amount, 15.49);
+        assert_eq!(nflx.median_amount, Money::parse("15.49").unwrap());
+        assert_eq!(nflx.mean_amount, Money::parse("15.49").unwrap());
         assert_eq!(nflx.trailing_12m_count, 4);
         assert_eq!(nflx.last_date, "2026-04-15");
         assert_eq!(nflx.next_projected_date, "2026-05-15");
@@ -782,7 +969,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Household:Supplies".to_string(),
-                    amount: 120.00,
+                    currency: "USD".to_string(),
+                    amount: Money::parse("120.00").unwrap(),
                 }],
             },
             Transaction {
@@ -791,7 +979,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Household:Supplies".to_string(),
-                    amount: 120.00,
+                    currency: "USD".to_string(),
+                    amount: Money::parse("120.00").unwrap(),
                 }],
             },
             Transaction {
@@ -800,7 +989,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Household:Supplies".to_string(),
-                    amount: 130.00,
+                    currency: "USD".to_string(),
+                    amount: Money::parse("130.00").unwrap(),
                 }],
             },
         ];
@@ -810,7 +1000,7 @@ mod tests {
         let costco = &obligations[0];
         assert_eq!(costco.payee, "Costco Renewal");
         assert_eq!(costco.cadence, RecurrenceCadence::Annual);
-        assert_eq!(costco.median_amount, 130.00);
+        assert_eq!(costco.median_amount, Money::parse("130").unwrap());
         assert_eq!(costco.total_count, 3);
         assert_eq!(costco.trailing_12m_count, 1);
         assert_eq!(costco.last_date, "2026-03-10");
@@ -826,7 +1016,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Health:Medical".to_string(),
-                    amount: 100.0,
+                    currency: "USD".to_string(),
+                    amount: Money::parse("100.0").unwrap(),
                 }],
             },
             Transaction {
@@ -835,7 +1026,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Health:Medical".to_string(),
-                    amount: 100.0,
+                    currency: "USD".to_string(),
+                    amount: Money::parse("100.0").unwrap(),
                 }],
             },
             Transaction {
@@ -844,7 +1036,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Health:Medical".to_string(),
-                    amount: 100.0,
+                    currency: "USD".to_string(),
+                    amount: Money::parse("100.0").unwrap(),
                 }],
             },
             Transaction {
@@ -853,7 +1046,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Health:Medical".to_string(),
-                    amount: 100.0,
+                    currency: "USD".to_string(),
+                    amount: Money::parse("100.0").unwrap(),
                 }],
             },
         ];
@@ -875,7 +1069,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Tech:Subscriptions".to_string(),
-                    amount: 10.0,
+                    currency: "USD".to_string(),
+                    amount: Money::parse("10.0").unwrap(),
                 }],
             },
             Transaction {
@@ -884,7 +1079,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Tech:Subscriptions".to_string(),
-                    amount: 20.0,
+                    currency: "USD".to_string(),
+                    amount: Money::parse("20.0").unwrap(),
                 }],
             },
         ];
@@ -892,8 +1088,8 @@ mod tests {
         let obligations = analyze_recurring_obligations(&txs, Some("2026-02-15"));
         assert_eq!(obligations.len(), 1);
         let s = &obligations[0];
-        assert_eq!(s.median_amount, 15.0);
-        assert_eq!(s.mean_amount, 15.0);
+        assert_eq!(s.median_amount, Money::parse("15").unwrap());
+        assert_eq!(s.mean_amount, Money::parse("15").unwrap());
     }
 
     #[test]
@@ -905,7 +1101,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Tech:Subscriptions".to_string(),
-                    amount: 10.00,
+                    currency: "USD".to_string(),
+                    amount: Money::parse("10.00").unwrap(),
                 }],
             },
             Transaction {
@@ -914,7 +1111,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Tech:Subscriptions".to_string(),
-                    amount: 10.00,
+                    currency: "USD".to_string(),
+                    amount: Money::parse("10.00").unwrap(),
                 }],
             },
             Transaction {
@@ -923,7 +1121,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Tech:Subscriptions".to_string(),
-                    amount: 15.00, // Price hiked from 10.00 to 15.00 (+50%)
+                    currency: "USD".to_string(),
+                    amount: Money::parse("15.00").unwrap(), // Price hiked from 10.00 to 15.00 (+50%)
                 }],
             },
         ];
@@ -932,10 +1131,10 @@ mod tests {
         assert_eq!(obligations.len(), 1);
         let o = &obligations[0];
         let delta = o.price_delta.as_ref().expect("Expected price delta");
-        assert_eq!(delta.latest_amount, 15.00);
-        assert_eq!(delta.median_amount, 10.00);
-        assert_eq!(delta.dollar_delta, 5.00);
-        assert_eq!(delta.percentage_delta, 50.0);
+        assert_eq!(delta.latest_amount, Money::parse("15").unwrap());
+        assert_eq!(delta.median_amount, Money::parse("10").unwrap());
+        assert_eq!(delta.dollar_delta, Money::parse("5").unwrap());
+        assert_eq!(delta.percentage_delta, Some(Money::parse("50").unwrap()));
         assert!(delta.is_increase);
 
         // Check that a price hike alert was generated
@@ -943,6 +1142,107 @@ mod tests {
             .alerts
             .iter()
             .any(|a| a.kind == RenewalAlertKind::PriceHike));
+    }
+
+    #[test]
+    fn price_delta_keeps_extreme_hikes_and_exact_thresholds() {
+        let tiny = Money::parse("0.000000000000000001").unwrap();
+        let hike =
+            compute_price_delta(Money::parse("1000000000000000").unwrap(), tiny, "EUR").unwrap();
+        assert!(hike.is_increase);
+        assert_eq!(hike.currency, "EUR");
+        assert_eq!(hike.percentage_delta, None);
+        let alert = evaluate_renewal_alerts(
+            RecurrenceCadence::Monthly,
+            "2026-03-01",
+            "2026-04-01",
+            Some(&hike),
+            None,
+        )
+        .into_iter()
+        .find(|alert| alert.kind == RenewalAlertKind::PriceHike)
+        .unwrap();
+        assert!(alert.message.contains("EUR (percentage unavailable)"));
+        assert!(!alert.message.contains("+percentage") && !alert.message.contains("unavailable%"));
+        let carry = Money::ratio_percent(
+            Money::parse("19999999999999.999999999999999999").unwrap(),
+            Money::parse("1000000000000000").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(carry.to_string(), "2");
+        let below = compute_price_delta(
+            Money::parse("999999999999999.999999999999999999").unwrap(),
+            Money::parse("1000000000000000").unwrap(),
+            "USD",
+        )
+        .unwrap();
+        assert_eq!(below.percentage_delta.unwrap().to_string(), "0");
+        let negative = Money::ratio_percent(
+            Money::parse("-19999999999999.999999999999999999").unwrap(),
+            Money::parse("1000000000000000").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(negative.to_string(), "-2");
+    }
+
+    #[test]
+    fn price_percentage_exactness_and_nonpositive_baselines() {
+        let exact = compute_price_delta(
+            Money::parse("9").unwrap(),
+            Money::parse("8").unwrap(),
+            "EUR",
+        )
+        .unwrap();
+        assert_eq!(exact.percentage_delta, Some(Money::parse("12.5").unwrap()));
+        assert!(!exact.percentage_is_estimate);
+
+        let repeating = compute_price_delta(
+            Money::parse("4").unwrap(),
+            Money::parse("3").unwrap(),
+            "EUR",
+        )
+        .unwrap();
+        assert!(repeating.percentage_delta.is_some());
+        assert!(repeating.percentage_is_estimate);
+
+        for baseline in ["0", "-2"] {
+            let delta = compute_price_delta(
+                Money::parse("1").unwrap(),
+                Money::parse(baseline).unwrap(),
+                "USD",
+            )
+            .unwrap();
+            assert_eq!(delta.percentage_delta, None);
+            assert!(!delta.is_increase);
+            let expected_delta = if baseline == "0" { "1" } else { "3" };
+            assert_eq!(delta.dollar_delta, Money::parse(expected_delta).unwrap());
+        }
+    }
+
+    #[test]
+    fn recurring_statistics_flag_rounded_fractional_median_and_mean() {
+        let txs = ["2026-01-01", "2026-02-01"]
+            .into_iter()
+            .zip(["0.000000000000000001", "0.000000000000000002"])
+            .map(|(date, amount)| Transaction {
+                date: date.into(),
+                payee: "Tiny".into(),
+                narration: "".into(),
+                postings: vec![Posting {
+                    account: "Expenses:Services:Monthly".into(),
+                    currency: "EUR".into(),
+                    amount: Money::parse(amount).unwrap(),
+                }],
+            })
+            .collect::<Vec<_>>();
+        let item = analyze_recurring_obligations(&txs, Some("2026-02-15"))
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(item.median_is_estimate);
+        assert_eq!(item.median_amount.to_string(), "0.000000000000000002");
+        assert!(item.mean_is_estimate);
+        assert_eq!(item.currency, "EUR");
     }
 
     #[test]
@@ -954,7 +1254,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Tech:Subscriptions".to_string(),
-                    amount: 100.0,
+                    currency: "USD".to_string(),
+                    amount: Money::parse("100.0").unwrap(),
                 }],
             },
             Transaction {
@@ -963,7 +1264,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Tech:Subscriptions".to_string(),
-                    amount: 100.0,
+                    currency: "USD".to_string(),
+                    amount: Money::parse("100.0").unwrap(),
                 }],
             },
         ];
@@ -973,6 +1275,7 @@ mod tests {
             key: "Annual Service::Expenses:Tech:Subscriptions".to_string(),
             payee: "Annual Service".to_string(),
             account: "Expenses:Tech:Subscriptions".to_string(),
+            currency: "USD".to_string(),
             billing_method: Some("Chase Visa".to_string()),
             cancellation_url: Some("https://example.com/cancel".to_string()),
             notes: Some("Cancel if not used".to_string()),
@@ -1016,6 +1319,7 @@ mod tests {
             key: "TestPayee::Expenses:Misc".to_string(),
             payee: "TestPayee".to_string(),
             account: "Expenses:Misc".to_string(),
+            currency: "USD".to_string(),
             billing_method: Some("Amex".to_string()),
             cancellation_url: Some("https://test.com/cancel".to_string()),
             notes: Some("Test note".to_string()),
@@ -1063,7 +1367,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Household:Supplies".to_string(),
-                    amount: 25.0,
+                    currency: "USD".to_string(),
+                    amount: Money::parse("25.0").unwrap(),
                 }],
             },
             Transaction {
@@ -1072,7 +1377,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Household:Supplies".to_string(),
-                    amount: 40.0,
+                    currency: "USD".to_string(),
+                    amount: Money::parse("40.0").unwrap(),
                 }],
             },
             Transaction {
@@ -1081,7 +1387,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Household:Supplies".to_string(),
-                    amount: 12.0,
+                    currency: "USD".to_string(),
+                    amount: Money::parse("12.0").unwrap(),
                 }],
             },
             Transaction {
@@ -1090,7 +1397,8 @@ mod tests {
                 narration: "".to_string(),
                 postings: vec![Posting {
                     account: "Expenses:Household:Supplies".to_string(),
-                    amount: 15.0,
+                    currency: "USD".to_string(),
+                    amount: Money::parse("15.0").unwrap(),
                 }],
             },
         ];

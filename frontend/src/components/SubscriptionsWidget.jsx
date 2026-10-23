@@ -1,10 +1,15 @@
 import { useState, useEffect, useMemo } from 'react';
 import { getRecurringObligations, saveSubscriptionMetadata } from '../services/apiClient';
+import { addMoney, formatMoney, multiplyDivideMoney } from '../utils/money';
 
 export default function SubscriptionsWidget() {
   const [obligations, setObligations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [selectedCurrency, setSelectedCurrency] = useState('USD');
+  const currencies = [...new Set(obligations.map(ob => ob.currency || ob.metadata?.currency || 'USD'))];
+  const currency = currencies.includes(selectedCurrency) ? selectedCurrency : (currencies.includes('USD') ? 'USD' : currencies[0]);
+  const activeObligations = obligations.filter(ob => (ob.currency || ob.metadata?.currency || 'USD') === currency);
 
   // Filters & Search
   const [searchTerm, setSearchTerm] = useState('');
@@ -49,12 +54,12 @@ export default function SubscriptionsWidget() {
 
   // Compute aggregate metrics
   const metrics = useMemo(() => {
-    if (!obligations || obligations.length === 0) {
+    if (!activeObligations.length) {
       return {
         totalSubscriptions: 0,
-        monthlyRunRate: 0,
-        currentMonthDue: 0,
-        nextMonthDue: 0,
+        monthlyRunRate: '0',
+        currentMonthDue: '0',
+        nextMonthDue: '0',
         alertsCount: 0,
         priceHikesCount: 0,
         activeTrialsCount: 0,
@@ -75,9 +80,9 @@ export default function SubscriptionsWidget() {
     const nextMonthDays = new Date(nextYear, nextMonth, 0).getDate();
     const horizonEndDateStr = `${nextYear}-${String(nextMonth).padStart(2, '0')}-${String(nextMonthDays).padStart(2, '0')}`;
 
-    let monthlyRunRate = 0;
-    let currentMonthDue = 0;
-    let nextMonthDue = 0;
+    let monthlyRunRate = '0';
+    let currentMonthDue = '0';
+    let nextMonthDue = '0';
     let alertsCount = 0;
     let priceHikesCount = 0;
     let activeTrialsCount = 0;
@@ -134,32 +139,22 @@ export default function SubscriptionsWidget() {
       return null;
     };
 
-    for (const ob of obligations) {
+    for (const ob of activeObligations) {
       if (ob.account) accountSet.add(ob.account);
 
       // Normalization factor to monthly run-rate
-      const amt = ob.median_amount || ob.latest_amount || 0;
+      const amt = ob.median_amount || ob.latest_amount || '0';
+      const factor = { weekly: [52, 12], biweekly: [26, 12], monthly: [1, 1], quarterly: [1, 3], semi_annual: [1, 6], annual: [1, 12] }[ob.cadence] || [1, 1];
+      monthlyRunRate = addMoney(monthlyRunRate, multiplyDivideMoney(amt, factor[0], factor[1]));
       switch (ob.cadence) {
         case 'weekly':
-          monthlyRunRate += amt * (52 / 12);
-          break;
         case 'biweekly':
-          monthlyRunRate += amt * (26 / 12);
-          break;
         case 'monthly':
-          monthlyRunRate += amt;
-          break;
         case 'quarterly':
-          monthlyRunRate += amt / 3;
-          break;
         case 'semi_annual':
-          monthlyRunRate += amt / 6;
-          break;
         case 'annual':
-          monthlyRunRate += amt / 12;
           break;
         default:
-          monthlyRunRate += amt;
           break;
       }
 
@@ -171,9 +166,9 @@ export default function SubscriptionsWidget() {
       while (projDate && projDate <= horizonEndDateStr && iterations < 12) {
         iterations += 1;
         if (projDate.startsWith(curMonthPrefix)) {
-          currentMonthDue += chargeAmt;
+          currentMonthDue = addMoney(currentMonthDue, chargeAmt);
         } else if (projDate.startsWith(nextMonthPrefix)) {
-          nextMonthDue += chargeAmt;
+          nextMonthDue = addMoney(nextMonthDue, chargeAmt);
         }
         projDate = stepNextDate(projDate, ob.cadence);
       }
@@ -193,20 +188,20 @@ export default function SubscriptionsWidget() {
     }
 
     return {
-      totalSubscriptions: obligations.length,
-      monthlyRunRate: Math.round(monthlyRunRate * 100) / 100,
-      currentMonthDue: Math.round(currentMonthDue * 100) / 100,
-      nextMonthDue: Math.round(nextMonthDue * 100) / 100,
+      totalSubscriptions: activeObligations.length,
+      monthlyRunRate,
+      currentMonthDue,
+      nextMonthDue,
       alertsCount,
       priceHikesCount,
       activeTrialsCount,
       accounts: Array.from(accountSet).sort(),
     };
-  }, [obligations]);
+  }, [activeObligations]);
 
   // Filtered & sorted obligations list
   const filteredObligations = useMemo(() => {
-    return obligations.filter((ob) => {
+    return activeObligations.filter((ob) => {
       // Cadence filter
       if (filterCadence !== 'ALL' && ob.cadence !== filterCadence) {
         return false;
@@ -239,7 +234,7 @@ export default function SubscriptionsWidget() {
       }
       return true;
     });
-  }, [obligations, filterCadence, filterAccount, filterAlertOnly, searchTerm]);
+  }, [activeObligations, filterCadence, filterAccount, filterAlertOnly, searchTerm]);
 
   // Open Edit Drawer
   const handleEdit = (ob) => {
@@ -278,6 +273,7 @@ export default function SubscriptionsWidget() {
       key: editingItem.key,
       payee: editingItem.payee,
       account: editingItem.account,
+      currency: editingItem.currency || editingItem.metadata?.currency || 'USD',
       billing_method: editBillingMethod.trim() || null,
       cancellation_url: editCancellationUrl.trim() || null,
       notes: editNotes.trim() || null,
@@ -352,10 +348,7 @@ export default function SubscriptionsWidget() {
     }
   };
 
-  const formatCurrency = (val) => {
-    if (typeof val !== 'number' || Number.isNaN(val)) return '$0.00';
-    return `$${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  };
+  const formatCurrency = (val, unit = currency, estimate = false) => `${formatMoney(val ?? '0', unit, estimate ? { rounding: 2 } : {})}${estimate ? ' estimate' : ''}`;
 
   const getCadenceBadge = (cadence) => {
     switch (cadence) {
@@ -407,9 +400,9 @@ export default function SubscriptionsWidget() {
         <div className="bg-zinc-950 p-5 rounded-lg border border-white/10 relative overflow-hidden shadow-lg">
           <div className="flex justify-between items-start">
             <div>
-              <p className="text-[10px] font-bold uppercase tracking-widest text-white/40">Monthly Run-Rate</p>
+              <p className="text-[10px] font-bold uppercase tracking-widest text-white/40">Monthly Run-Rate Estimate</p>
               <h2 className="text-2xl font-black text-accent mt-1 tracking-tight">
-                {formatCurrency(metrics.monthlyRunRate)}
+                {formatCurrency(metrics.monthlyRunRate, currency, true)}
               </h2>
             </div>
             <span className="text-xl opacity-60">📈</span>
@@ -477,6 +470,7 @@ export default function SubscriptionsWidget() {
       </div>
 
       {/* Control Bar: Filters & Search */}
+      <label className="flex items-center gap-2 text-xs font-mono uppercase text-white/50">Currency <select value={currency || ''} onChange={e => setSelectedCurrency(e.target.value)} className="bg-zinc-950 border border-white/10 rounded px-2 py-1 text-white">{currencies.map(unit => <option key={unit} value={unit}>{unit}</option>)}</select><span>{currency || 'No unit'} totals only</span></label>
       <div className="bg-zinc-950 p-4 rounded-lg border border-white/10 flex flex-col md:flex-row gap-4 items-center justify-between">
         <div className="flex-1 w-full md:w-auto relative">
           <span className="absolute left-3 top-2.5 text-white/30 text-sm">🔍</span>
@@ -636,8 +630,10 @@ export default function SubscriptionsWidget() {
                             {formatCurrency(ob.latest_amount)}
                           </span>
                           <span className="text-[10px] font-mono text-white/40">
-                            med: {formatCurrency(ob.median_amount)}
+                            med: {formatCurrency(ob.median_amount)}{ob.median_is_estimate ? ' estimate' : ''}
                           </span>
+                          <span className="text-[10px] font-mono text-white/30">mean: {formatCurrency(ob.mean_amount)}{ob.mean_is_estimate ? ' estimate' : ''}</span>
+                          {priceDelta && <span className="text-[10px] font-mono text-white/40">change: {formatCurrency(priceDelta.dollar_delta, priceDelta.currency || currency)} ({priceDelta.percentage_delta == null ? 'percentage unavailable' : `${formatMoney(priceDelta.percentage_delta, '').trim()}%${priceDelta.percentage_is_estimate ? ' estimate' : ''}`})</span>}
                         </div>
                       </td>
 
@@ -669,7 +665,7 @@ export default function SubscriptionsWidget() {
                           </div>
                         ) : priceDelta && priceDelta.is_increase ? (
                           <span className="text-xs text-red-400 font-mono">
-                            +{priceDelta.percentage_delta}%
+                            {priceDelta.percentage_delta == null ? 'Percentage unavailable' : `+${formatMoney(priceDelta.percentage_delta, '').trim()}%${priceDelta.percentage_is_estimate ? ' estimate' : ''}`}
                           </span>
                         ) : (
                           <span className="text-xs text-white/20">Nominal</span>

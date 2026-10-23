@@ -1,11 +1,12 @@
 {
   "name": "navis-recon",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "test": "node --test --test-isolation=none",
     "desktop": "tauri dev --config src-tauri/tauri.conf.json",
     "desktop:build": "tauri build --config src-tauri/tauri.conf.json && powershell -NoProfile -ExecutionPolicy Bypass -File ..\\scripts\\publish-desktop.ps1",
     "lint": "eslint .",

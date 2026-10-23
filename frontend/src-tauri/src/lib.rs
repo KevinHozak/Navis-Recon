@@ -2,6 +2,7 @@ mod checklist;
 mod config;
 mod ledger_parser;
 mod ledger_review;
+mod money;
 mod obligations;
 mod records;
 mod statements;

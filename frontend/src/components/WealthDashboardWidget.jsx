@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
-import { getLedgerHistory } from '../services/apiClient';
+import { getLedgerHistory, getLedgerSummary } from '../services/apiClient';
+import { formatMoney, moneyToChartNumber } from '../utils/money';
 
-const formatYAxis = (tickItem) => {
-  if (tickItem >= 1000000) return `$${(tickItem / 1000000).toFixed(1)}M`;
-  if (tickItem >= 1000) return `$${(tickItem / 1000).toFixed(0)}k`;
-  return `$${tickItem}`;
+const formatYAxis = (tickItem, currency) => {
+  if (tickItem >= 1000000) return `${currency} ${(tickItem / 1000000).toFixed(1)}M`;
+  if (tickItem >= 1000) return `${currency} ${(tickItem / 1000).toFixed(0)}k`;
+  return `${currency} ${tickItem}`;
 };
 
 const CustomTooltip = ({ active, payload, label }) => {
@@ -15,7 +16,7 @@ const CustomTooltip = ({ active, payload, label }) => {
       <div className="bg-zinc-950/90 border border-white/10 p-4 rounded-lg shadow-2xl backdrop-blur-sm">
         <p className="text-white/50 text-xs font-mono uppercase mb-2">{label}</p>
         <p className="text-white font-bold text-lg">
-          {data.name}: <span style={{ color: data.color }}>${data.value.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
+          {data.name}: <span style={{ color: data.color }}>{data.payload?.[`${data.dataKey}Exact`] != null ? formatMoney(data.payload[`${data.dataKey}Exact`], data.payload?.currency || 'USD') : 'Unavailable'}</span>
         </p>
       </div>
     );
@@ -35,10 +36,14 @@ export default function WealthDashboardWidget() {
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [summary, setSummary] = useState(null);
+  const [summaryError, setSummaryError] = useState(null);
 
   async function fetchHistory() {
     try {
-      setHistory(await getLedgerHistory());
+      const [rows, totals] = await Promise.all([getLedgerHistory(), getLedgerSummary().catch(e => { setSummaryError(e?.message || String(e)); return null; })]);
+      setHistory(rows);
+      setSummary(totals);
     } catch (e) {
       console.error(e);
       setError(e?.message || String(e) || "Failed to fetch dashboard history");
@@ -67,7 +72,7 @@ export default function WealthDashboardWidget() {
       <div className="h-64 w-full bg-zinc-950 border border-white/5 rounded-lg p-4 shadow-inner relative group">
         <div className="absolute inset-0 bg-gradient-to-b from-white/[0.02] to-transparent opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none rounded-lg" />
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={history} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+          <AreaChart data={history.map(item => ({ ...item, [`${dataKey}Exact`]: item[dataKey], [dataKey]: moneyToChartNumber(item[dataKey]) }))} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
             <defs>
               <linearGradient id={`color_${dataKey}`} x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor={color} stopOpacity={0.3}/>
@@ -86,7 +91,7 @@ export default function WealthDashboardWidget() {
             <YAxis 
               stroke="rgba(255,255,255,0.2)" 
               tick={{ fill: 'rgba(255,255,255,0.4)', fontSize: 10, fontFamily: 'monospace' }} 
-              tickFormatter={formatYAxis}
+              tickFormatter={value => formatYAxis(value, history[0]?.currency || summary?.selected_currency || 'USD')}
               width={60}
               domain={['auto', 'auto']}
             />
@@ -113,9 +118,10 @@ export default function WealthDashboardWidget() {
         <span className="text-4xl text-accent">🏦</span>
         <div>
           <h2 className="text-3xl font-black uppercase tracking-widest text-white">The Vault Performance</h2>
-          <p className="text-white/40 text-sm font-mono mt-1">Live Beancount Telemetry</p>
+          <p className="text-white/40 text-sm font-mono mt-1">{history[0]?.currency || summary?.selected_currency || 'USD'} selected-unit history · no currency conversions</p>
         </div>
       </div>
+      {summaryError ? <p className="text-amber-300 text-xs font-mono">Unvalued-unit summary unavailable: {summaryError}</p> : summary?.unvalued_units?.length > 0 ? <p className="text-amber-300 text-xs font-mono">History covers {history[0]?.currency || summary.selected_currency} only. Unvalued units excluded: {summary.unvalued_units.join(', ')}.</p> : null}
       
       <div className="max-w-5xl mx-auto pb-12">
         {renderChart("📈 Overall Portfolio Growth", "Net Worth", "#059669")}
