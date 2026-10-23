@@ -17,6 +17,7 @@ pub fn run() {
             ledger_review::get_ledger_categories,
             ledger_review::approve_ledger_transaction,
             ledger_parser::get_ledger_summary,
+            ledger_parser::get_ledger_source_state,
             ledger_parser::get_ledger_history,
             ledger_parser::get_ledger_transactions,
             obligations::get_recurring_obligations,

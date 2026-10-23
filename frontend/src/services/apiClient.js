@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080'
+const API_BASE = import.meta.env?.VITE_API_URL || 'http://localhost:8080'
 
 export const isDesktopRuntime = () =>
   typeof window !== 'undefined' && Boolean(window.__TAURI_INTERNALS__)
@@ -85,6 +85,13 @@ export function getLedgerSummary() {
   return request('/api/ledger/summary', {
     ipcCommand: 'get_ledger_summary',
     ipcArgs: {},
+  })
+}
+
+export function getLedgerSourceState(expectedRevision) {
+  return request('/api/ledger/source-state', {
+    ipcCommand: 'get_ledger_source_state',
+    ipcArgs: { expectedRevision },
   })
 }
 

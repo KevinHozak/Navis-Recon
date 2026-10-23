@@ -1836,10 +1836,11 @@ dependencies = [
 
 [[package]]
 name = "navis-recon"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "windows-sys 0.61.2",

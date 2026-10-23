@@ -74,6 +74,26 @@ Supported account roots are Assets, Liabilities, Equity, Income, and Expenses; a
 * `get_ledger_history`: Calculates monthly history snapshots for the trailing 24 months, tracking net worth, retirement accounts, stocks, and HSA metrics over time.
 * `get_ledger_transactions`: Retrieves and sorts transactions by date matching an account prefix (e.g. for account-level drill-downs).
 
+#### Summary provenance, coverage, and source freshness (RECON-S003)
+
+Each successful `get_ledger_summary` response remains the existing S002 summary, with its exact monetary decimal strings and these additional root fields:
+
+| Field | Meaning |
+| --- | --- |
+| `ledger_revision` | Lowercase SHA-256 hex digest of the source file's raw bytes. |
+| `read_at_unix_ms` | UTC epoch milliseconds when the source snapshot was read. This is distinct from the last transaction date. |
+| `latest_transaction_date` | Latest transaction date in `YYYY-MM-DD` form, or an empty string when no transaction exists. It does not determine freshness. |
+| `valuation_basis` | `native_units_no_conversion`; the selected unit is reported without FX conversion. |
+| `validation_status` | `validated` only for a complete successful parse. A failure rejects the summary and returns no financial totals. |
+| `coverage` | Direct `{ account, currency, balance, included_in_net_worth, reason }` rows. Balances are signed decimal strings. Rows include zero balances and account parents and children. |
+| `transaction_count`, `posting_count` | Counts in the validated source. |
+| `account_count` | Count of unique account names across all units (a name repeated in several units counts once). |
+| `selected_included_account_count`, `selected_excluded_account_count` | Counts of account/unit coverage rows in the selected currency only. |
+
+Coverage reasons are `included_selected_unit_asset`, `included_selected_unit_liability`, `unvalued_unit`, and `outside_net_worth`. Each exact account/unit pair appears once; included asset and liability reasons must match their account roots, and selected-unit Assets/Liabilities cannot be marked outside net worth. Assets and liabilities retain their signed balances. The frontend sums only included rows in the selected unit, separately reconciles asset and liability subtotals, then checks the combined value against `total_assets`, `total_liabilities`, and `net_worth` using exact decimal arithmetic. A mismatch or malformed/missing provenance suppresses the financial display and reports that the summary cannot be validated. Excluded equity, income, and expense rows are identified as outside net worth. Other units are shown as excluded without valuation; their separate existing per-unit disclosures remain separate and are never combined.
+
+The read-only `get_ledger_source_state(expected_revision)` IPC command returns `{ expected_revision, observed_revision, state, checked_at_unix_ms, error }`, where `state` is `current`, `changed`, or `unavailable`. Current and changed replies require a lowercase or uppercase SHA-256 hex observed revision and a null error; current must match the expected revision and changed must differ. Unavailable requires a null observed revision and useful error text. Probe timestamps and summary read timestamps are safe nonnegative epoch milliseconds within JavaScript Date's range; the latest transaction date must be a real calendar date (or empty when no transaction exists). Tauri receives the JavaScript argument as `expectedRevision`. The overview checks immediately after loading a summary, on window focus, and every 60 seconds while mounted. While a follow-up check runs, the UI keeps the last confirmed changed/unavailable state and diagnostic visible and adds checking progress; only a coherent current result clears a stale warning. Unknown states, malformed replies, or rejected checks conservatively show source unavailable and identify the last successful snapshot. Manual Refresh clears the displayed financial data while loading and reads a new complete summary; a failed refresh leaves no old totals displayed. The UI does not infer staleness from transaction age. Summary read/parse failures reject instead of returning a numeric zero; partial diagnostics point to the invalid source location, while unavailable diagnostics direct attention to the configured file path/access or explain an empty ledger.
+
 ### 3. Vault Checklist (`checklist.rs`)
 * `get_vault_checklist`: Reads and parses `checklist.json` (supporting optional UTF-8 BOM encoding) into structured weekly triage tasks and monthly statement grid items.
 * `save_vault_checklist`: Serializes the checklist payload with pretty formatting and writes it atomically to disk.

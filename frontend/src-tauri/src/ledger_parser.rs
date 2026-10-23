@@ -1,5 +1,6 @@
 use crate::money::Money;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -36,6 +37,33 @@ pub struct LedgerSummary {
     pub credit_cards: BTreeMap<String, Money>,
     pub housing: Money,
     pub cash: Money,
+    pub ledger_revision: String,
+    pub read_at_unix_ms: u128,
+    pub latest_transaction_date: String,
+    pub valuation_basis: String,
+    pub validation_status: String,
+    pub coverage: Vec<AccountCoverage>,
+    pub transaction_count: usize,
+    pub posting_count: usize,
+    pub account_count: usize,
+    pub selected_included_account_count: usize,
+    pub selected_excluded_account_count: usize,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountCoverage {
+    pub account: String,
+    pub currency: String,
+    pub balance: Money,
+    pub included_in_net_worth: bool,
+    pub reason: String,
+}
+#[derive(Debug, Serialize)]
+pub struct LedgerSourceState {
+    pub expected_revision: String,
+    pub observed_revision: Option<String>,
+    pub state: String,
+    pub checked_at_unix_ms: u128,
+    pub error: Option<String>,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct CurrencyTotals {
@@ -567,6 +595,8 @@ fn currency_totals(transactions: &[Transaction]) -> BTreeMap<String, CurrencyTot
 fn summary_from_transactions_for_currency(
     transactions: &[Transaction],
     selected: &str,
+    revision: String,
+    read_at_unix_ms: u128,
 ) -> LedgerSummary {
     let balances = selected_unit_balances(transactions, selected);
     let assets = subtree_total(&balances, "Assets");
@@ -575,7 +605,32 @@ fn summary_from_transactions_for_currency(
         .iter()
         .flat_map(|t| t.postings.iter().map(|p| p.currency.clone()))
         .collect::<BTreeSet<_>>();
-    LedgerSummary {
+    let all_balances = all_unit_balances(transactions);
+    let mut coverage = Vec::new();
+    for ((account, currency), balance) in &all_balances {
+        let selected_unit = currency == selected;
+        let included_reason = match account.split(':').next().unwrap_or("") {
+            "Assets" => Some("included_selected_unit_asset"),
+            "Liabilities" => Some("included_selected_unit_liability"),
+            _ => None,
+        };
+        let included = selected_unit && included_reason.is_some();
+        let reason = if !selected_unit {
+            "unvalued_unit"
+        } else if let Some(reason) = included_reason {
+            reason
+        } else {
+            "outside_net_worth"
+        };
+        coverage.push(AccountCoverage {
+            account: account.clone(),
+            currency: currency.clone(),
+            balance: *balance,
+            included_in_net_worth: included,
+            reason: reason.into(),
+        });
+    }
+    let summary = LedgerSummary {
         status: "validated".into(),
         diagnostics: vec![],
         currency: selected.into(),
@@ -600,7 +655,74 @@ fn summary_from_transactions_for_currency(
         credit_cards: leaf_balances(&balances, "Liabilities:CreditCard"),
         housing: subtree_total(&balances, "Assets:Housing"),
         cash: subtree_total(&balances, "Assets:Cash"),
+        ledger_revision: revision,
+        read_at_unix_ms,
+        latest_transaction_date: transactions
+            .iter()
+            .map(|tx| tx.date.as_str())
+            .max()
+            .unwrap_or("")
+            .to_string(),
+        valuation_basis: "native_units_no_conversion".into(),
+        validation_status: "validated".into(),
+        transaction_count: transactions.len(),
+        posting_count: transactions.iter().map(|tx| tx.postings.len()).sum(),
+        account_count: all_balances
+            .keys()
+            .map(|(account, _)| account)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        selected_included_account_count: coverage
+            .iter()
+            .filter(|c| c.currency == selected && c.included_in_net_worth)
+            .count(),
+        selected_excluded_account_count: coverage
+            .iter()
+            .filter(|c| c.currency == selected && !c.included_in_net_worth)
+            .count(),
+        coverage,
+    };
+    // Preserve a strict reconciliation invariant using the same direct-account coverage rows.
+    let covered_assets = summary
+        .coverage
+        .iter()
+        .filter(|c| {
+            c.currency == selected
+                && c.included_in_net_worth
+                && c.reason == "included_selected_unit_asset"
+        })
+        .map(|c| c.balance)
+        .fold(Money::default(), |a, b| a + b);
+    let covered_liabilities = summary
+        .coverage
+        .iter()
+        .filter(|c| {
+            c.currency == selected
+                && c.included_in_net_worth
+                && c.reason == "included_selected_unit_liability"
+        })
+        .map(|c| c.balance)
+        .fold(Money::default(), |a, b| a + b);
+    debug_assert_eq!(covered_assets, summary.total_assets);
+    debug_assert_eq!(covered_liabilities, summary.total_liabilities);
+    summary
+}
+fn all_unit_balances(transactions: &[Transaction]) -> BTreeMap<(String, String), Money> {
+    let mut balances = BTreeMap::new();
+    for tx in transactions {
+        for p in &tx.postings {
+            *balances
+                .entry((p.account.clone(), p.currency.clone()))
+                .or_default() += p.amount;
+        }
     }
+    balances
+}
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 pub(crate) fn validated_transactions() -> Result<Vec<Transaction>, String> {
     let path = crate::config::get("ledger_path");
@@ -626,9 +748,81 @@ fn validated_transactions_from_path(
 }
 #[tauri::command]
 pub fn get_ledger_summary() -> Result<LedgerSummary, String> {
-    let t = validated_transactions()?;
-    let selected = crate::config::get("ledger_currency");
-    Ok(summary_from_transactions_for_currency(&t, selected))
+    summary_from_path_with_clock(
+        crate::config::get("ledger_path"),
+        crate::config::get("ledger_currency"),
+        unix_now_ms,
+    )
+}
+fn unix_now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or_default()
+}
+fn summary_from_path_with_clock(
+    path: &str,
+    selected: &str,
+    clock: fn() -> u128,
+) -> Result<LedgerSummary, String> {
+    let bytes = fs::read(path)
+        .map_err(|e| format!("unavailable: {path}: line 1: failed to read ledger: {e}"))?;
+    let revision = sha256_hex(&bytes);
+    let contents = decode_ledger(path, bytes)?;
+    let transactions = parse_with_currency(&contents, selected).map_err(|e| {
+        if e.first().is_some_and(|d| d.starts_with("unavailable:")) {
+            let detail = e
+                .iter()
+                .map(|d| d.strip_prefix("unavailable: ").unwrap_or(d))
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!("unavailable: {path}: {detail}")
+        } else {
+            parse_error_message(path, e)
+        }
+    })?;
+    let read_at_unix_ms = clock();
+    Ok(summary_from_transactions_for_currency(
+        &transactions,
+        selected,
+        revision,
+        read_at_unix_ms,
+    ))
+}
+#[tauri::command]
+pub fn get_ledger_source_state(expected_revision: String) -> LedgerSourceState {
+    let path = crate::config::get("ledger_path");
+    source_state_from_path(path, expected_revision, unix_now_ms())
+}
+fn source_state_from_path(
+    path: &str,
+    expected_revision: String,
+    checked_at_unix_ms: u128,
+) -> LedgerSourceState {
+    match fs::read(path) {
+        Ok(bytes) => {
+            let observed_revision = sha256_hex(&bytes);
+            let state = if observed_revision == expected_revision {
+                "current"
+            } else {
+                "changed"
+            };
+            LedgerSourceState {
+                expected_revision,
+                observed_revision: Some(observed_revision),
+                state: state.into(),
+                checked_at_unix_ms,
+                error: None,
+            }
+        }
+        Err(e) => LedgerSourceState {
+            expected_revision,
+            observed_revision: None,
+            state: "unavailable".into(),
+            checked_at_unix_ms,
+            error: Some(format!("{path}: failed to read ledger: {e}")),
+        },
+    }
 }
 #[tauri::command]
 pub fn get_ledger_history() -> Result<Vec<HistorySnapshot>, String> {
@@ -660,6 +854,9 @@ pub fn get_ledger_transactions(prefix: String) -> Result<Vec<LedgerTransaction>,
 #[cfg(test)]
 mod strict_subset_tests {
     use super::*;
+    fn fixed_clock() -> u128 {
+        1_800_000_000_123
+    }
     fn ok(body: &str) {
         parse_with_currency(body, "USD").unwrap();
     }
@@ -811,7 +1008,7 @@ mod strict_subset_tests {
     fn production_summary_preserves_exact_selected_unit_and_serializes_money_as_strings() {
         let ledger = "2024-01-01 * \"units\"\n  Assets:Bank 1 EUR\n  Equity:Opening -1 EUR\n  Assets:Investments:VTI 9 VTI\n  Equity:Opening -9 VTI\n  Assets:Bank 1 USD\n  Equity:Opening -1 USD\n2024-01-02 * \"fractional\"\n  Assets:Bank 0.0001 USD\n  Equity:Opening -0.0001 USD\n2024-01-03 * \"refund\"\n  Assets:Bank -2 USD\n  Liabilities:CreditCard 2 USD\n";
         let tx = parse_with_currency(ledger, "EUR").unwrap();
-        let summary = summary_from_transactions_for_currency(&tx, "EUR");
+        let summary = summary_from_transactions_for_currency(&tx, "EUR", "test-revision".into(), 1);
         assert_eq!(summary.total_assets.to_string(), "1");
         assert_eq!(summary.currency, "EUR");
         assert_eq!(
@@ -834,6 +1031,133 @@ mod strict_subset_tests {
             summary.totals_by_currency["USD"].net_worth.to_string(),
             "1.0001"
         );
+    }
+    #[test]
+    fn production_path_summary_hashes_raw_bytes_and_reconciles_direct_account_coverage() {
+        let path =
+            std::env::temp_dir().join(format!("navis-recon-s003-{}-summary", std::process::id()));
+        let source = b"2024-03-02 * \"later\"\n  Assets:Bank:Checking 10 USD\n  Equity:Opening -10 USD\n2024-01-01 * \"earlier\"\n  Assets:Bank 2 USD\n  Assets:Bank:Checking -2 USD\n  Assets:Bank:Zero 1 USD\n  Assets:Bank:Zero -1 USD\n  Liabilities:Card 1 USD\n  Equity:Opening -1 USD\n2024-01-03 * \"eur\"\n  Assets:Bank 3 EUR\n  Equity:Opening -3 EUR\n2024-01-04 * \"stock\"\n  Assets:Investments:VTI 4 VTI\n  Equity:Opening -4 VTI\n2024-01-05 * \"negative asset\"\n  Assets:Cash:Overdraft -4 USD\n  Equity:Opening 4 USD\n";
+        fs::write(&path, source).unwrap();
+        let name = path.to_string_lossy();
+        let summary = summary_from_path_with_clock(&name, "USD", fixed_clock).unwrap();
+        assert_eq!(summary.ledger_revision, sha256_hex(source));
+        assert_eq!(
+            sha256_hex(b"hello world"),
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+        assert_eq!(summary.read_at_unix_ms, fixed_clock());
+        assert_eq!(summary.latest_transaction_date, "2024-03-02");
+        assert_eq!(summary.valuation_basis, "native_units_no_conversion");
+        assert_eq!((summary.transaction_count, summary.posting_count), (5, 14));
+        let assets = summary
+            .coverage
+            .iter()
+            .filter(|c| c.currency == "USD" && c.reason == "included_selected_unit_asset")
+            .map(|c| c.balance)
+            .fold(Money::default(), |a, b| a + b);
+        let liabilities = summary
+            .coverage
+            .iter()
+            .filter(|c| c.currency == "USD" && c.reason == "included_selected_unit_liability")
+            .map(|c| c.balance)
+            .fold(Money::default(), |a, b| a + b);
+        assert_eq!(assets, summary.total_assets);
+        assert_eq!(liabilities, summary.total_liabilities);
+        assert_eq!(summary.net_worth, assets + liabilities);
+        assert!(summary
+            .coverage
+            .iter()
+            .any(|c| c.account == "Assets:Bank:Zero" && c.balance.is_zero()));
+        assert!(summary
+            .coverage
+            .iter()
+            .any(|c| c.account == "Assets:Cash:Overdraft"
+                && c.balance.to_string() == "-4"
+                && c.reason == "included_selected_unit_asset"));
+        assert_eq!(summary.selected_included_account_count, 5);
+        assert_eq!(summary.selected_excluded_account_count, 1);
+        assert!(summary
+            .coverage
+            .iter()
+            .any(|c| c.account == "Assets:Bank:Checking"));
+        assert!(summary
+            .coverage
+            .iter()
+            .any(|c| c.account == "Equity:Opening" && c.reason == "outside_net_worth"));
+        assert!(summary
+            .coverage
+            .iter()
+            .any(|c| c.currency == "EUR" && c.reason == "unvalued_unit"));
+        assert!(summary
+            .coverage
+            .iter()
+            .any(|c| c.currency == "VTI" && c.reason == "unvalued_unit"));
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["total_assets"], summary.total_assets.to_string());
+        assert!(json["coverage"][0]["balance"].as_str().is_some());
+        assert_eq!(
+            summary_from_path_with_clock(&name, "USD", fixed_clock)
+                .unwrap()
+                .ledger_revision,
+            summary.ledger_revision
+        );
+        fs::write(&path, [source.as_slice(), b"; changed bytes\n"].concat()).unwrap();
+        assert_ne!(
+            summary_from_path_with_clock(&name, "USD", fixed_clock)
+                .unwrap()
+                .ledger_revision,
+            summary.ledger_revision
+        );
+        let _ = fs::remove_file(path);
+    }
+    #[test]
+    fn production_path_summary_rejects_partial_invalid_utf8_empty_and_unreadable_sources() {
+        let path =
+            std::env::temp_dir().join(format!("navis-recon-s003-{}-failure", std::process::id()));
+        fs::write(&path, "2024-01-01 * \"valid\"\n  Assets:Cash 1 USD\n  Equity:Opening -1 USD\ninclude \"missing.bean\"\n").unwrap();
+        let name = path.to_string_lossy();
+        assert!(summary_from_path_with_clock(&name, "USD", fixed_clock)
+            .unwrap_err()
+            .starts_with(&format!("partial: {name}: line 4:")));
+        fs::write(&path, [0xff]).unwrap();
+        assert!(summary_from_path_with_clock(&name, "USD", fixed_clock)
+            .unwrap_err()
+            .starts_with("unavailable:"));
+        fs::write(&path, " ; empty\n").unwrap();
+        assert!(summary_from_path_with_clock(&name, "USD", fixed_clock)
+            .unwrap_err()
+            .starts_with("unavailable:"));
+        let missing = format!("{name}-missing");
+        assert!(summary_from_path_with_clock(&missing, "USD", fixed_clock)
+            .unwrap_err()
+            .starts_with("unavailable:"));
+        let _ = fs::remove_file(path);
+    }
+    #[test]
+    fn freshness_state_contract_preserves_expected_revision_and_distinguishes_outcomes() {
+        let path =
+            std::env::temp_dir().join(format!("navis-recon-s003-{}-probe", std::process::id()));
+        fs::write(&path, b"content").unwrap();
+        let name = path.to_string_lossy();
+        let revision = sha256_hex(b"content");
+        let current = source_state_from_path(&name, revision.clone(), fixed_clock());
+        assert_eq!(
+            (current.state.as_str(), current.expected_revision.as_str()),
+            ("current", revision.as_str())
+        );
+        assert_eq!(
+            current.observed_revision.as_deref(),
+            Some(revision.as_str())
+        );
+        let changed = source_state_from_path(&name, "old".into(), fixed_clock());
+        assert_eq!(changed.state, "changed");
+        assert_eq!(changed.expected_revision, "old");
+        let missing = format!("{name}-missing");
+        let unavailable = source_state_from_path(&missing, "keep".into(), fixed_clock());
+        assert_eq!(unavailable.expected_revision, "keep");
+        assert_eq!(unavailable.state, "unavailable");
+        assert!(unavailable.observed_revision.is_none() && unavailable.error.is_some());
+        let _ = fs::remove_file(path);
     }
     #[test]
     fn numerically_cancelling_mixed_units_are_rejected_with_source_line() {
