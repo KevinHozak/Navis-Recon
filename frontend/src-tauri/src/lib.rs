@@ -35,7 +35,9 @@ pub fn run() {
             statements::get_statement_catalog,
             statements::open_statement_file,
             sync::start_ledger_sync,
+            sync::get_sync_run,
             sync::commit_ledger_sync,
+            sync::cancel_sync_run,
             ping
         ])
         .run(tauri::generate_context!())

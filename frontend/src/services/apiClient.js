@@ -146,25 +146,50 @@ export function startLedgerSync() {
   return invoke('start_ledger_sync')
 }
 
-export function commitLedgerSync(payload) {
-  if (isDesktopRuntime()) {
-    return invoke('commit_ledger_sync', { payload })
-  }
-  return request('/api/ledger/sync/commit', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
+export function getSyncRun() {
+  if (!isDesktopRuntime()) return Promise.reject(new Error('Ledger sync requires the Tauri desktop shell.'))
+  return invoke('get_sync_run')
 }
 
-export async function listenForSyncEvents(handlers) {
-  if (!isDesktopRuntime()) return () => {}
-  const unlisteners = await Promise.all(
-    Object.entries(handlers).map(([eventName, handler]) =>
-      listen(`sync:${eventName}`, (event) => handler(event.payload))
-    )
-  )
-  return () => Promise.all(unlisteners.map((unlisten) => unlisten()))
+export function commitLedgerSync(runId, payload) {
+  if (!isDesktopRuntime()) return Promise.reject(new Error('Ledger sync requires the Tauri desktop shell.'))
+  return invoke('commit_ledger_sync', { runId, payload })
+}
+
+export function cancelSyncRun(runId) {
+  if (!isDesktopRuntime()) return Promise.reject(new Error('Ledger sync requires the Tauri desktop shell.'))
+  return invoke('cancel_sync_run', { runId })
+}
+
+export async function registerSyncEventListeners(handlers, listenFn, signal) {
+  const unlisteners = []
+  let disposed = false
+  const cleanup = () => {
+    if (disposed) return
+    disposed = true
+    signal?.removeEventListener('abort', cleanup)
+    unlisteners.splice(0).forEach((unlisten) => unlisten())
+  }
+  if (signal?.aborted) return cleanup
+  signal?.addEventListener('abort', cleanup, { once: true })
+  try {
+    for (const [eventName, handler] of Object.entries(handlers)) {
+      if (disposed) break
+      const unlisten = await listenFn(`sync:${eventName}`, (event) => { if (!disposed) handler(event.payload) })
+      if (disposed) unlisten()
+      else unlisteners.push(unlisten)
+    }
+  } catch (error) {
+    cleanup()
+    throw error
+  }
+  signal?.removeEventListener('abort', cleanup)
+  return cleanup
+}
+
+export function listenForSyncEvents(handlers, { signal } = {}) {
+  if (!isDesktopRuntime()) return Promise.resolve(() => {})
+  return registerSyncEventListeners(handlers, listen, signal)
 }
 
 export function getStatementCatalog(customPath = null) {

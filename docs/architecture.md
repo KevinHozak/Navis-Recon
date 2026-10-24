@@ -105,8 +105,10 @@ The read-only `get_ledger_source_state(expected_revision)` IPC command returns `
 * `save_vault_checklist`: Serializes the checklist payload with pretty formatting and writes it atomically to disk.
 
 ### 4. Harvester & Sync Pipeline (`sync.rs`)
-* `start_ledger_sync`: Spawns the Codex Harvester (`finance_processor.py --analyze`) in a background blocking task and streams JSON log/match events over Tauri event channels (`sync:log`, `sync:match`, `sync:unmatched`, `sync:error`, `sync:done`).
-* `commit_ledger_sync`: Executes `finance_processor.py --commit`, piping approved file actions via stdin and returning execution results.
+* `start_ledger_sync`: Reserves the sole in-memory current run while holding the coordinator lock, then starts `finance_processor.py --analyze` in a blocking worker. Runs have a backend ID, monotonic snapshot revision, per-run event sequence, and `idle`, `analyzing`, `review`, `committing`, `complete`, `failed`, or `cancelled` status.
+* `get_sync_run`: Returns the authoritative snapshot, including retained logs, matches, unmatched items, errors, and the last result. `sync:state` carries a snapshot; all `sync:log`, `sync:match`, `sync:unmatched`, `sync:error`, and `sync:done` events wrap their existing payload under `payload` and carry backend `run_id`, `revision`, and `sequence`. Backend identity replaces any child-supplied identity. Older workers cannot update a later run.
+* `commit_ledger_sync`: Requires the current run ID, review status, and a nonempty selection; reserves `committing` synchronously and executes `finance_processor.py --commit` in a blocking worker. Structured errors and nonzero exits produce `failed`.
+* `cancel_sync_run`: Abandons a current review. Active analysis/commit cannot be cancelled yet. Run state is process-memory only; durable per-file outcomes, idempotent retries, process cancellation/timeouts, and stable selection persistence are later work.
 
 ### 5. IPC Diagnostic (`lib.rs`)
 * `ping`: Returns `"pong"` to allow the frontend to verify desktop IPC health.
@@ -130,7 +132,7 @@ Obligation medians and means use fixed 18-place decimal arithmetic. `median_is_e
 * **CategorySelector.jsx**: Searchable fuzzy category picker for quick reclassification.
 * **VaultChecklist.jsx**: Monthly statement reconciliation grid and weekly cadence triage tracker.
 * **WealthDashboardWidget.jsx**: Historical net worth chart and long-term trend analysis.
-* **SyncWidget.jsx**: Interactive terminal streaming real-time event updates from the harvester bridge.
+* **SyncWidget.jsx**: Reconciles subscribed run events with the authoritative native snapshot on mount; the controller rejects older revisions and stale run events, and retains review results across view remounts.
 
 ---
 
