@@ -9,12 +9,11 @@ pub const MAX_TIMEOUT_SECONDS: u64 = 3600;
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_RETAINED_LOGS: usize = 1000;
-#[cfg(all(test, windows))]
-static TEST_RESUME_FAILURE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-#[cfg(all(test, windows))]
-static TEST_RESUME_UNCERTAIN: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+#[derive(Clone, Copy, Default)]
+struct FaultInjection {
+    resume_failure: bool,
+    uncertain_cleanup: bool,
+}
 
 pub fn timeout_seconds(value: &str) -> Result<u64, String> {
     let seconds: u64 = value
@@ -152,7 +151,29 @@ mod windows_runner {
         F: FnMut(bool, &str),
         C: Fn() -> bool,
     {
-        let result = unsafe { run_inner(program, args, timeout, cancelled, &mut on_line) };
+        run_with_faults(
+            program,
+            args,
+            timeout,
+            cancelled,
+            &mut on_line,
+            FaultInjection::default(),
+        )
+    }
+
+    pub(super) fn run_with_faults<F, C>(
+        program: &str,
+        args: &[String],
+        timeout: Duration,
+        cancelled: C,
+        on_line: &mut F,
+        faults: FaultInjection,
+    ) -> RunReport
+    where
+        F: FnMut(bool, &str),
+        C: Fn() -> bool,
+    {
+        let result = unsafe { run_inner(program, args, timeout, cancelled, on_line, faults) };
         result.unwrap_or_else(|error| {
             let process_may_exist = error != "CreateProcessW failed"
                 && !error.contains("CreatePipe")
@@ -176,6 +197,7 @@ mod windows_runner {
         timeout: Duration,
         cancelled: C,
         on_line: &mut F,
+        faults: FaultInjection,
     ) -> Result<RunReport, String>
     where
         F: FnMut(bool, &str),
@@ -284,10 +306,7 @@ mod windows_runner {
                 }),
             });
         }
-        #[cfg(test)]
-        let resume_failed = TEST_RESUME_FAILURE.swap(false, std::sync::atomic::Ordering::SeqCst);
-        #[cfg(not(test))]
-        let resume_failed = false;
+        let resume_failed = faults.resume_failure;
         if resume_failed || ResumeThread(thread.0) == u32::MAX {
             let requested = TerminateJobObject(job.0, 1) != 0;
             let until = Instant::now() + Duration::from_secs(2);
@@ -308,9 +327,7 @@ mod windows_runner {
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            #[cfg(test)]
-            let ended =
-                ended && !TEST_RESUME_UNCERTAIN.swap(false, std::sync::atomic::Ordering::SeqCst);
+            let ended = ended && !faults.uncertain_cleanup;
             return Ok(RunReport {
                 exit_code: None,
                 ended,
@@ -501,6 +518,22 @@ mod windows_runner {
 #[cfg(windows)]
 pub use windows_runner::run;
 
+#[cfg(all(test, windows))]
+fn run_with_faults<F, C>(
+    program: &str,
+    args: &[String],
+    timeout: Duration,
+    cancelled: C,
+    mut line: F,
+    faults: FaultInjection,
+) -> RunReport
+where
+    F: FnMut(bool, &str),
+    C: Fn() -> bool,
+{
+    windows_runner::run_with_faults(program, args, timeout, cancelled, &mut line, faults)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,8 +583,8 @@ mod tests {
     #[test]
     fn runner_bounds_timeout_and_kills_descendants_holding_stdout() {
         let timed = run_script("import time\ntime.sleep(30)\n", Duration::from_millis(250));
-        assert!(timed.timed_out);
-        assert!(timed.ended);
+        assert!(timed.timed_out, "timeout report: {timed:?}");
+        assert!(timed.ended, "timeout report: {timed:?}");
 
         let descendant = run_script(
             "import subprocess,sys\nsubprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])\n",
@@ -617,15 +650,18 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn resume_failure_fault_hook_confirms_owned_job_cleanup_and_uncertainty() {
-        let path =
-            script("from pathlib import Path\nPath('resume-must-not-run').write_text('x')\n");
-        TEST_RESUME_FAILURE.store(true, std::sync::atomic::Ordering::SeqCst);
-        let confirmed = super::run(
+        let path = script("raise SystemExit('must not run')\n");
+        let args = [path.to_string_lossy().into_owned()];
+        let confirmed = super::run_with_faults(
             "python",
-            &[path.to_string_lossy().into_owned()],
+            &args,
             Duration::from_secs(5),
             || false,
             |_, _| {},
+            FaultInjection {
+                resume_failure: true,
+                uncertain_cleanup: false,
+            },
         );
         assert!(
             confirmed.ended
@@ -634,14 +670,16 @@ mod tests {
                     .as_deref()
                     .is_some_and(|v| v.contains("terminated"))
         );
-        TEST_RESUME_FAILURE.store(true, std::sync::atomic::Ordering::SeqCst);
-        TEST_RESUME_UNCERTAIN.store(true, std::sync::atomic::Ordering::SeqCst);
-        let uncertain = super::run(
+        let uncertain = super::run_with_faults(
             "python",
-            &[path.to_string_lossy().into_owned()],
+            &args,
             Duration::from_secs(5),
             || false,
             |_, _| {},
+            FaultInjection {
+                resume_failure: true,
+                uncertain_cleanup: true,
+            },
         );
         let _ = std::fs::remove_file(path);
         assert!(
@@ -651,6 +689,47 @@ mod tests {
                     .as_deref()
                     .is_some_and(|v| v.contains("uncertain"))
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn concurrent_runner_faults_are_scoped_to_the_invocation() {
+        use std::sync::{Arc, Barrier};
+        let path = script("import time\ntime.sleep(0.05)\n");
+        let args = vec![path.to_string_lossy().into_owned()];
+        let barrier = Arc::new(Barrier::new(3));
+        let mut workers = Vec::new();
+        for injected in [true, false] {
+            let barrier = barrier.clone();
+            let args = args.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                super::run_with_faults(
+                    "python",
+                    &args,
+                    Duration::from_secs(5),
+                    || false,
+                    |_, _| {},
+                    FaultInjection {
+                        resume_failure: injected,
+                        uncertain_cleanup: false,
+                    },
+                )
+            }));
+        }
+        barrier.wait();
+        let injected = workers.remove(0).join().unwrap();
+        let ordinary = workers.remove(0).join().unwrap();
+        let _ = std::fs::remove_file(path);
+        assert!(
+            injected.ended
+                && injected
+                    .error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("terminated")),
+            "{injected:?}"
+        );
+        assert!(ordinary.ended && ordinary.error.is_none(), "{ordinary:?}");
     }
 
     #[cfg(windows)]

@@ -14,6 +14,20 @@ mod sync_receipts;
 
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            let window_config = app.config().app.windows.first().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Navis-Recon main window configuration is missing",
+                )
+            })?;
+
+            tauri::WebviewWindowBuilder::from_config(app.handle(), window_config)?
+                .initialization_script(include_str!("../startup_migration.js"))
+                .build()?;
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             checklist::get_vault_checklist,
             checklist::save_vault_checklist,

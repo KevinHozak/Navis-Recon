@@ -19,6 +19,22 @@ pub(crate) struct Transaction {
     pub(crate) narration: String,
     pub(crate) postings: Vec<Posting>,
 }
+#[derive(Clone)]
+struct PadDirective {
+    date: String,
+    account: String,
+    source: String,
+    line: usize,
+}
+#[derive(Clone)]
+struct BalanceDirective {
+    date: String,
+    account: String,
+    amount: Money,
+    currency: String,
+    tolerance: Money,
+    line: usize,
+}
 #[derive(Debug, Serialize)]
 pub struct LedgerSummary {
     pub status: String,
@@ -168,13 +184,21 @@ fn quoted(s: &str) -> Option<(String, &str)> {
     }
     Some((value.to_string(), &s[end + 1..]))
 }
-fn header(line: &str) -> Option<(String, String, String)> {
+fn header(line: &str) -> Option<(String, String, String, char)> {
     let (date, rest) = line.split_once(' ')?;
     if !valid_date(date) {
         return None;
     }
     let rest = rest.trim_start();
-    let rest = rest.strip_prefix('*').or_else(|| rest.strip_prefix('!'))?;
+    let (flag, rest) = if let Some(r) = rest.strip_prefix('*') {
+        ('*', r)
+    } else if let Some(r) = rest.strip_prefix('!') {
+        ('!', r)
+    } else if let Some(r) = rest.strip_prefix('P') {
+        ('P', r)
+    } else {
+        return None;
+    };
     if rest
         .chars()
         .next()
@@ -186,13 +210,13 @@ fn header(line: &str) -> Option<(String, String, String)> {
     let (a, tail) = quoted(rest)?;
     let tail = tail.trim_start();
     if tail.is_empty() {
-        return Some((date.into(), String::new(), a));
+        return Some((date.into(), String::new(), a, flag));
     }
     let (b, tail) = quoted(tail)?;
     if !tail.trim().is_empty() {
         return None;
     }
-    Some((date.into(), a, b))
+    Some((date.into(), a, b, flag))
 }
 fn location(line: usize, msg: &str) -> String {
     format!("line {line}: {msg}")
@@ -228,6 +252,11 @@ pub(crate) fn parse_with_currency(
     let mut i = 0;
     let mut seen_directive = false;
     let mut totals: BTreeMap<(String, String), Money> = BTreeMap::new();
+    let mut tx_lines = Vec::new();
+    let mut pads: Vec<PadDirective> = Vec::new();
+    let mut assertions: Vec<BalanceDirective> = Vec::new();
+    let mut opens: BTreeMap<String, String> = BTreeMap::new();
+    let mut open_units: BTreeMap<String, Option<String>> = BTreeMap::new();
     let mut ledger_magnitude = Money::default();
     let max_movement = Money::from_scaled(Money::MAX).expect("MAX is within i128");
     if !valid_currency(currency) {
@@ -267,11 +296,26 @@ pub(crate) fn parse_with_currency(
                     continue;
                 }
             };
-            if !end.trim().is_empty() || key != "title" || val.is_empty() {
-                errs.push(location(
-                    i + 1,
-                    "unsupported option (only a fully quoted title is supported)",
-                ))
+            if key == "title" && !val.is_empty() && end.trim().is_empty() {
+                // Display-only ledger metadata.
+            } else if key == "operating_currency"
+                && !val.is_empty()
+                && end.trim().is_empty()
+                && valid_currency(&val)
+            {
+                // Beancount's operating_currency option takes one quoted unit per line.
+            } else {
+                if key == "operating_currency" {
+                    errs.push(location(
+                        i + 1,
+                        "operating_currency requires exactly one uppercase unit token",
+                    ));
+                } else {
+                    errs.push(location(
+                        i + 1,
+                        "unsupported option (supported options are title and operating_currency)",
+                    ));
+                }
             }
             i += 1;
             continue;
@@ -286,6 +330,104 @@ pub(crate) fn parse_with_currency(
                         || (fields.len() == 3 && !valid_currency(fields[2]))
                     {
                         errs.push(location(i+1,"invalid open directive; expected YYYY-MM-DD open ACCOUNT [LEDGER_CURRENCY]"))
+                    } else {
+                        open_units.insert(
+                            fields[1].to_string(),
+                            fields.get(2).map(|v| (*v).to_string()),
+                        );
+                        if opens
+                            .insert(fields[1].to_string(), date.to_string())
+                            .is_some()
+                        {
+                            errs.push(location(
+                                i + 1,
+                                "duplicate account open directive is unsupported",
+                            ));
+                        }
+                    }
+                    i += 1;
+                    continue;
+                }
+                if valid_date(date) && rest.starts_with("pad ") {
+                    seen_directive = true;
+                    let fields: Vec<_> = rest.split_whitespace().collect();
+                    if fields.len() == 3 && account_ok(fields[1]) && account_ok(fields[2]) {
+                        pads.push(PadDirective {
+                            date: date.into(),
+                            account: fields[1].into(),
+                            source: fields[2].into(),
+                            line: i + 1,
+                        });
+                    } else {
+                        errs.push(location(
+                            i + 1,
+                            "invalid pad directive; expected YYYY-MM-DD pad ACCOUNT SOURCE_ACCOUNT",
+                        ));
+                    }
+                    i += 1;
+                    continue;
+                }
+                if valid_date(date) && rest.starts_with("balance ") {
+                    seen_directive = true;
+                    let fields: Vec<_> = rest.split_whitespace().collect();
+                    let parsed = (|| {
+                        if !(fields.len() == 4 || fields.len() == 6) || !account_ok(fields[1]) {
+                            return None;
+                        }
+                        let amount = plain_decimal(fields[2])?;
+                        let (currency, tolerance) = if fields.len() == 6 {
+                            if fields[3] != "~" {
+                                return None;
+                            }
+                            let t = plain_decimal(fields[4])?;
+                            if t < Money::default() {
+                                return None;
+                            }
+                            (fields[5], t)
+                        } else {
+                            let places =
+                                fields[2].split_once('.').map_or(0, |(_, frac)| frac.len());
+                            let t = if places == 0 {
+                                Money::default()
+                            } else {
+                                Money::parse(&format!("0.{}1", "0".repeat(places - 1))).ok()?
+                            };
+                            (fields[3], t)
+                        };
+                        if !valid_currency(currency) {
+                            return None;
+                        }
+                        Some((amount, currency, tolerance))
+                    })();
+                    if let Some((amount, currency, tolerance)) = parsed {
+                        assertions.push(BalanceDirective {
+                            date: date.into(),
+                            account: fields[1].into(),
+                            amount,
+                            currency: currency.into(),
+                            tolerance,
+                            line: i + 1,
+                        });
+                    } else {
+                        errs.push(location(i + 1, "invalid balance directive or unsupported tolerance; expected exact amount and optional ~TOLERANCE"));
+                    }
+                    i += 1;
+                    continue;
+                }
+                if valid_date(date) && rest.starts_with("custom ") {
+                    let mut r = rest.trim_start_matches("custom ").trim_start();
+                    let mut values = Vec::new();
+                    while !r.is_empty() {
+                        match quoted(r) {
+                            Some((v, tail)) => {
+                                values.push(v);
+                                r = tail.trim_start();
+                            }
+                            None => break,
+                        }
+                    }
+                    if values.len() != 3 || values[0] != "fava-option" || !r.is_empty() {
+                        errs.push(location(i + 1, "unsupported custom directive (only three-string fava-option metadata is supported)"));
                     }
                     i += 1;
                     continue;
@@ -298,7 +440,7 @@ pub(crate) fn parse_with_currency(
                 i += 1;
                 continue;
             }
-            if let Some((date, payee, narration)) = header(line) {
+            if let Some((date, payee, narration, _flag)) = header(line) {
                 let start = i + 1;
                 let mut posts = vec![];
                 let mut sums: BTreeMap<String, Money> = BTreeMap::new();
@@ -400,6 +542,7 @@ pub(crate) fn parse_with_currency(
                     ))
                 }
                 if errs.is_empty() {
+                    tx_lines.push(start);
                     txs.push(Transaction {
                         date,
                         payee,
@@ -433,6 +576,341 @@ pub(crate) fn parse_with_currency(
     if !seen_directive {
         return Err(vec![format!("unavailable: {}", location(1, "ledger contains no supported financial entries; empty/comment-only ledger is unavailable"))]);
     }
+    for pad in &pads {
+        if !opens
+            .get(&pad.account)
+            .is_some_and(|opened| opened <= &pad.date)
+            || !opens
+                .get(&pad.source)
+                .is_some_and(|opened| opened <= &pad.date)
+        {
+            errs.push(location(
+                pad.line,
+                "pad accounts must both have open directives",
+            ));
+        }
+    }
+    for check in &assertions {
+        if !opens
+            .get(&check.account)
+            .is_some_and(|opened| opened <= &check.date)
+        {
+            errs.push(location(
+                check.line,
+                "balance assertion references an account without an open directive",
+            ));
+        }
+        if open_units
+            .get(&check.account)
+            .and_then(Option::as_ref)
+            .is_some_and(|unit| unit != &check.currency)
+        {
+            errs.push(location(
+                check.line,
+                "balance assertion currency is not allowed by the account open directive",
+            ));
+        }
+    }
+    if !errs.is_empty() {
+        return Err(errs);
+    }
+
+    #[derive(Clone)]
+    enum Event {
+        Transaction(Transaction),
+        Pad(usize),
+        Balance(usize),
+    }
+    let mut events: Vec<(String, i8, usize, Event)> = Vec::new();
+    for (tx, line) in txs.drain(..).zip(tx_lines.drain(..)) {
+        events.push((tx.date.clone(), 0, line, Event::Transaction(tx)));
+    }
+    for (index, pad) in pads.iter().enumerate() {
+        events.push((pad.date.clone(), 0, pad.line, Event::Pad(index)));
+    }
+    for (index, check) in assertions.iter().enumerate() {
+        events.push((check.date.clone(), -1, check.line, Event::Balance(index)));
+    }
+    events.sort_by(|a, b| (&a.0, a.1, a.2).cmp(&(&b.0, b.1, b.2)));
+    let mut active_pads: BTreeMap<String, usize> = BTreeMap::new();
+    let mut used_pads: BTreeSet<usize> = BTreeSet::new();
+    let mut padded_currencies: BTreeSet<(usize, String)> = BTreeSet::new();
+    let mut running: BTreeMap<(String, String), Money> = BTreeMap::new();
+    let mut ordered = Vec::new();
+    let mut ordered_lines = Vec::new();
+    for (_date, _, line, event) in events {
+        match event {
+            Event::Transaction(tx) => {
+                for posting in &tx.postings {
+                    let amount = running
+                        .entry((posting.account.clone(), posting.currency.clone()))
+                        .or_default();
+                    if let Some(sum) = amount.checked_add(posting.amount) {
+                        if sum.abs() > max_movement {
+                            errs.push(location(
+                                line,
+                                "chronological account balance exceeds the supported 1e15 bound",
+                            ));
+                        } else {
+                            *amount = sum;
+                        }
+                    } else {
+                        errs.push(location(line, "chronological account balance overflow"));
+                    }
+                }
+                ordered.push(tx);
+                ordered_lines.push(line);
+            }
+            Event::Pad(index) => {
+                active_pads.insert(pads[index].account.clone(), index);
+            }
+            Event::Balance(index) => {
+                let check = &assertions[index];
+                let candidates: Vec<_> = active_pads
+                    .iter()
+                    .filter(|(account, _)| {
+                        check.account == **account
+                            || check.account.starts_with(&format!("{}:", account))
+                    })
+                    .map(|(_, index)| *index)
+                    .collect();
+                if candidates.len() > 1 {
+                    errs.push(location(
+                        check.line,
+                        "ambiguous active padding directives for balance assertion",
+                    ));
+                    continue;
+                }
+                let candidate = candidates.first().copied();
+                let can_pad = candidate.filter(|pad_index| {
+                    padded_currencies.insert((*pad_index, check.currency.clone()))
+                });
+                let total = running
+                    .iter()
+                    .filter(|((account, currency), _)| {
+                        *currency == check.currency
+                            && (account == &check.account
+                                || account.starts_with(&format!("{}:", check.account)))
+                    })
+                    .map(|(_, value)| *value)
+                    .try_fold(Money::default(), |a, b| a.checked_add(b));
+                let Some(current) = total else {
+                    errs.push(location(
+                        check.line,
+                        "balance assertion subtree total overflow",
+                    ));
+                    continue;
+                };
+                if current.abs() > max_movement {
+                    errs.push(location(
+                        check.line,
+                        "balance assertion subtree exceeds the supported 1e15 bound",
+                    ));
+                    continue;
+                }
+                let diff = check.amount - current;
+                if diff.abs() > check.tolerance {
+                    if diff.abs() > max_movement {
+                        errs.push(location(
+                            check.line,
+                            "padding difference exceeds the supported 1e15 bound",
+                        ));
+                        continue;
+                    }
+                    let Some(pad_index) = can_pad else {
+                        errs.push(location(
+                            check.line,
+                            if candidate.is_some() {
+                                "padding directive already used for this currency"
+                            } else {
+                                "balance assertion does not match the chronological account balance"
+                            },
+                        ));
+                        continue;
+                    };
+                    let pad = &pads[pad_index];
+                    if [pad.account.as_str(), pad.source.as_str()]
+                        .iter()
+                        .any(|account| {
+                            open_units
+                                .get(*account)
+                                .and_then(Option::as_ref)
+                                .is_some_and(|unit| unit != &check.currency)
+                        })
+                    {
+                        errs.push(location(
+                            check.line,
+                            "padding currency is not allowed by a pad account open directive",
+                        ));
+                        continue;
+                    }
+                    let neg_diff = -diff;
+                    let Some(pad_total) = running
+                        .entry((pad.account.clone(), check.currency.clone()))
+                        .or_default()
+                        .checked_add(diff)
+                    else {
+                        errs.push(location(check.line, "padding account balance overflow"));
+                        continue;
+                    };
+                    if pad_total.abs() > max_movement {
+                        errs.push(location(
+                            check.line,
+                            "padding account balance exceeds the supported 1e15 bound",
+                        ));
+                        continue;
+                    }
+                    running.insert((pad.account.clone(), check.currency.clone()), pad_total);
+                    let Some(source_total) = running
+                        .entry((pad.source.clone(), check.currency.clone()))
+                        .or_default()
+                        .checked_add(neg_diff)
+                    else {
+                        errs.push(location(check.line, "padding source balance overflow"));
+                        continue;
+                    };
+                    if source_total.abs() > max_movement {
+                        errs.push(location(
+                            check.line,
+                            "padding source balance exceeds the supported 1e15 bound",
+                        ));
+                        continue;
+                    }
+                    running.insert((pad.source.clone(), check.currency.clone()), source_total);
+                    ordered.push(Transaction {
+                        date: pad.date.clone(),
+                        payee: String::new(),
+                        narration: "(Beancount padding)".into(),
+                        postings: vec![
+                            Posting {
+                                account: pad.account.clone(),
+                                amount: diff,
+                                currency: check.currency.clone(),
+                            },
+                            Posting {
+                                account: pad.source.clone(),
+                                amount: neg_diff,
+                                currency: check.currency.clone(),
+                            },
+                        ],
+                    });
+                    ordered_lines.push(pad.line);
+                    let Some(generated_movement) = diff.abs().checked_add(diff.abs()) else {
+                        errs.push(location(check.line, "padding movement overflow"));
+                        continue;
+                    };
+                    let Some(total_movement) = ledger_magnitude.checked_add(generated_movement)
+                    else {
+                        errs.push(location(check.line, "total ledger movement overflow"));
+                        continue;
+                    };
+                    if generated_movement > max_movement || total_movement > max_movement {
+                        errs.push(location(
+                            check.line,
+                            "generated padding exceeds the supported 1e15 movement bound",
+                        ));
+                        continue;
+                    }
+                    ledger_magnitude = total_movement;
+                    used_pads.insert(pad_index);
+                }
+            }
+        }
+    }
+    for (index, pad) in pads.iter().enumerate() {
+        if !used_pads.contains(&index) {
+            errs.push(location(pad.line, "unused pad directive"));
+        }
+    }
+    // Re-run every assertion over the final stream. Padding is dated at the
+    // pad directive, so it must participate in assertions between that date
+    // and the assertion that caused it to be generated.
+    #[derive(Clone, Copy)]
+    enum VerifyEvent {
+        Transaction(usize),
+        Balance(usize),
+    }
+    let mut verify_events: Vec<(String, i8, usize, VerifyEvent)> = Vec::new();
+    for (index, tx) in ordered.iter().enumerate() {
+        verify_events.push((tx.date.clone(), 0, index, VerifyEvent::Transaction(index)));
+    }
+    for (index, check) in assertions.iter().enumerate() {
+        verify_events.push((
+            check.date.clone(),
+            -1,
+            check.line,
+            VerifyEvent::Balance(index),
+        ));
+    }
+    verify_events.sort_by(|a, b| (&a.0, a.1, a.2).cmp(&(&b.0, b.1, b.2)));
+    let mut verified_balances: BTreeMap<(String, String), Money> = BTreeMap::new();
+    for (_, _, _, event) in verify_events {
+        match event {
+            VerifyEvent::Transaction(index) => {
+                for posting in &ordered[index].postings {
+                    let key = (posting.account.clone(), posting.currency.clone());
+                    let Some(sum) = verified_balances
+                        .get(&key)
+                        .copied()
+                        .unwrap_or_default()
+                        .checked_add(posting.amount)
+                    else {
+                        errs.push(location(
+                            ordered_lines[index],
+                            "final chronological account balance overflow",
+                        ));
+                        continue;
+                    };
+                    if sum.abs() > max_movement {
+                        errs.push(location(
+                            ordered_lines[index],
+                            "final chronological account balance exceeds the supported 1e15 bound",
+                        ));
+                    } else {
+                        verified_balances.insert(key, sum);
+                    }
+                }
+            }
+            VerifyEvent::Balance(index) => {
+                let check = &assertions[index];
+                let current = verified_balances
+                    .iter()
+                    .filter(|((account, currency), _)| {
+                        currency == &check.currency
+                            && (account == &check.account
+                                || account.starts_with(&format!("{}:", check.account)))
+                    })
+                    .map(|(_, amount)| *amount)
+                    .try_fold(Money::default(), |sum, amount| sum.checked_add(amount));
+                let Some(current) = current else {
+                    errs.push(location(
+                        check.line,
+                        "final balance assertion subtree overflow",
+                    ));
+                    continue;
+                };
+                if current.abs() > max_movement {
+                    errs.push(location(
+                        check.line,
+                        "final balance assertion subtree exceeds the supported 1e15 bound",
+                    ));
+                    continue;
+                }
+                if (check.amount - current).abs() > check.tolerance {
+                    errs.push(location(
+                        check.line,
+                        "balance assertion fails after applying chronological padding",
+                    ));
+                }
+            }
+        }
+    }
+    if !errs.is_empty() {
+        return Err(errs);
+    }
+    let mut ordered_pairs: Vec<_> = ordered.into_iter().zip(ordered_lines).collect();
+    ordered_pairs.sort_by(|a, b| (&a.0.date, a.1).cmp(&(&b.0.date, b.1)));
+    txs = ordered_pairs.into_iter().map(|(tx, _)| tx).collect();
     Ok(txs)
 }
 pub(crate) fn valid_currency(s: &str) -> bool {
@@ -882,6 +1360,160 @@ mod strict_subset_tests {
         );
     }
     #[test]
+    fn supports_operating_currency_padding_balance_hierarchy_and_source_date_order() {
+        let ledger = concat!(
+            "option \"operating_currency\" \"USD\"\n",
+            "2024-01-01 open Assets:Parent USD\n",
+            "2024-01-01 open Assets:Parent:Bank USD\n",
+            "2024-01-01 open Equity:Opening USD\n",
+            "2024-01-01 pad Assets:Parent Equity:Opening\n",
+            "2024-01-01 * \"same day\"\n  Assets:Parent:Bank 2 USD\n  Equity:Opening -2 USD\n",
+            "2024-01-05 * \"later in time\"\n  Assets:Parent:Bank 5 USD\n  Equity:Opening -5 USD\n",
+            "2024-01-03 P \"earlier transaction\"\n  Assets:Parent:Bank 10 USD\n  Equity:Opening -10 USD\n",
+            "2024-01-06 balance Assets:Parent 20 USD\n",
+            "2024-01-06 custom \"fava-option\" \"key\" \"value\"\n",
+        );
+        let tx = parse_with_currency(ledger, "USD").unwrap();
+        assert_eq!(tx.len(), 4);
+        assert_eq!(tx[0].date, "2024-01-01"); // generated on the pad date
+        assert_eq!(tx[0].narration, "(Beancount padding)");
+        assert_eq!(tx[1].date, "2024-01-01");
+        assert_eq!(tx[2].date, "2024-01-03");
+        assert_eq!(tx[3].date, "2024-01-05");
+        assert_eq!(
+            account_balances(&tx)["Assets:Parent"],
+            Money::parse("3").unwrap()
+        );
+        assert_eq!(
+            subtree_total(&account_balances(&tx), "Assets:Parent"),
+            Money::parse("20").unwrap()
+        );
+    }
+    #[test]
+    fn balance_tolerance_and_padding_errors_are_exact_and_fail_closed() {
+        let base = concat!(
+            "2024-01-01 open Assets:Bank USD\n",
+            "2024-01-01 open Equity:Opening USD\n",
+            "2024-01-01 * \"seed\"\n  Assets:Bank 1 USD\n  Equity:Opening -1 USD\n",
+        );
+        assert!(parse_with_currency(
+            &format!("{base}2024-01-02 balance Assets:Bank 1.01 ~ 0.01 USD\n"),
+            "USD"
+        )
+        .is_ok());
+        assert!(parse_with_currency(
+            &format!("{base}2024-01-02 balance Assets:Bank 1.01 ~ 0.009 USD\n"),
+            "USD"
+        )
+        .is_err());
+        assert!(parse_with_currency(&format!("{base}2024-01-02 pad Assets:Bank Equity:Opening\n2024-01-03 balance Assets:Bank 1 USD\n"), "USD").unwrap_err().join(";").contains("unused pad"));
+        assert!(parse_with_currency(
+            &format!("{base}2024-01-02 balance Assets:Bank 2 USD\n"),
+            "USD"
+        )
+        .unwrap_err()
+        .join(";")
+        .contains("does not match"));
+        assert!(parse_with_currency(
+            &format!("{base}2024-01-02 balance Assets:Bank 1.01 USD\n"),
+            "USD"
+        )
+        .is_ok());
+        assert!(parse_with_currency(
+            &format!("{base}2024-01-02 balance Assets:Bank 1.02 USD\n"),
+            "USD"
+        )
+        .is_err());
+        assert!(parse_with_currency(
+            &format!("{base}2024-01-02 balance Assets:Bank 1.01 ~0.01 USD\n"),
+            "USD"
+        )
+        .is_err());
+        let late_open = concat!(
+            "2024-01-02 open Assets:Bank USD\n2024-01-01 open Equity:Opening USD\n",
+            "2024-01-01 pad Assets:Bank Equity:Opening\n",
+        );
+        assert!(parse_with_currency(late_open, "USD")
+            .unwrap_err()
+            .join(";")
+            .contains("pad accounts must both have open"));
+        let assertion_before_open =
+            "2024-01-02 open Assets:Bank USD\n2024-01-01 balance Assets:Bank 0 USD\n";
+        assert!(parse_with_currency(assertion_before_open, "USD")
+            .unwrap_err()
+            .join(";")
+            .contains("without an open directive"));
+    }
+    #[test]
+    fn validates_operating_currency_tokens_and_lists() {
+        let valid_entries =
+            concat!("2024-01-01 * \"valid\"\n  Assets:Bank 1 USD\n  Equity:Opening -1 USD\n",);
+        assert!(parse_with_currency(
+            &format!("option \"operating_currency\" \"USD\"\noption \"operating_currency\" \"CAD\"\n{valid_entries}"),
+            "USD"
+        ).is_ok());
+        assert!(parse_with_currency(
+            &format!("option \"operating_currency\" \"USD\" \"CAD\"\n{valid_entries}"),
+            "USD"
+        )
+        .is_err());
+        assert!(parse_with_currency(
+            &format!("option \"operating_currency\" \"usd\"\n{valid_entries}"),
+            "USD"
+        )
+        .is_err());
+        assert!(parse_with_currency(
+            &format!("option \"operating_currency\" \"USD\" \"USD\"\n{valid_entries}"),
+            "USD"
+        )
+        .is_err());
+    }
+    #[test]
+    fn overlapping_active_pads_are_rejected_as_ambiguous() {
+        let ledger = concat!(
+            "2024-01-01 open Assets:Parent USD\n2024-01-01 open Assets:Parent:Bank USD\n",
+            "2024-01-01 open Equity:Opening USD\n",
+            "2024-01-01 pad Assets:Parent Equity:Opening\n2024-01-02 pad Assets:Parent:Bank Equity:Opening\n",
+            "2024-01-03 balance Assets:Parent:Bank 1 USD\n",
+        );
+        let errors = parse_with_currency(ledger, "USD").unwrap_err().join(";");
+        assert!(errors.contains("ambiguous active padding"), "{errors}");
+    }
+    #[test]
+    fn padding_is_consumed_by_first_check_and_final_checks_use_padded_account_scope() {
+        let consumed = concat!(
+            "2024-01-01 open Assets:Bank USD\n2024-01-01 open Equity:Opening USD\n",
+            "2024-01-02 pad Assets:Bank Equity:Opening\n",
+            "2024-01-03 balance Assets:Bank 0 USD\n",
+            "2024-01-04 * \"movement\"\n  Assets:Bank 1 USD\n  Equity:Opening -1 USD\n",
+            "2024-01-05 balance Assets:Bank 3 USD\n",
+        );
+        assert!(parse_with_currency(consumed, "USD")
+            .unwrap_err()
+            .join(";")
+            .contains("already used"));
+
+        let ancestor = concat!(
+            "2024-01-01 open Assets:Parent USD\n2024-01-01 open Assets:Parent:Bank USD\n",
+            "2024-01-01 open Equity:Opening USD\n2024-01-01 pad Assets:Parent Equity:Opening\n",
+            "2024-01-02 balance Assets:Parent:Bank 1 USD\n",
+        );
+        assert!(parse_with_currency(ancestor, "USD")
+            .unwrap_err()
+            .join(";")
+            .contains("fails after applying chronological padding"));
+
+        let source_inside_subtree = concat!(
+            "2024-01-01 open Assets:Parent USD\n2024-01-01 open Assets:Parent:Sweep USD\n",
+            "2024-01-01 pad Assets:Parent Assets:Parent:Sweep\n",
+            "2024-01-02 balance Assets:Parent 1 USD\n",
+        );
+        assert!(parse_with_currency(source_inside_subtree, "USD")
+            .unwrap_err()
+            .join(";")
+            .contains("fails after applying chronological padding"));
+    }
+    #[test]
     fn rejects_semantic_malformed_and_unsupported_entries() {
         for s in [
             "",
@@ -889,7 +1521,6 @@ mod strict_subset_tests {
             "2023-02-29 open Assets:Bank\n",
             "open Assets:Bank USD\n",
             "option \"title\" \"ok\" trailing\n",
-            "option \"operating_currency\" \"USD\"\n",
             "plugin \"x\"\n",
             "include \"x\"\n",
             "2024-01-01 * \"x\" #tag\n  Assets:Bank -1\n  Expenses:Food 1\n",
