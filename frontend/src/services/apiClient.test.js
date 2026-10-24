@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { approveLedgerTransaction, getLedgerSourceState, getLedgerSummary } from './apiClient.js'
+import { approveLedgerTransaction, getLedgerSourceState, getLedgerSummary, getPendingLedger } from './apiClient.js'
 
 test('ledger API client preserves Tauri arguments and exact summary provenance at IPC boundary', async () => {
   const hadWindow = Object.hasOwn(globalThis, 'window')
@@ -51,6 +51,20 @@ test('ledger approval IPC includes line, stable transaction identity, revision, 
     globalThis.window = { __TAURI_INTERNALS__: { invoke: async (command, args) => { calls.push({ command, args }) } } }
     await approveLedgerTransaction(7, 'b'.repeat(64), 'a'.repeat(64), 'Expenses:Food')
     assert.deepEqual(calls, [{ command: 'approve_ledger_transaction', args: { lineNum: 7, transactionId: 'b'.repeat(64), ledgerRevision: 'a'.repeat(64), category: 'Expenses:Food' } }])
+  } finally {
+    if (hadWindow) globalThis.window = originalWindow
+    else delete globalThis.window
+  }
+})
+
+test('pending ledger IPC preserves per-row permission snapshot', async () => {
+  const hadWindow = Object.hasOwn(globalThis, 'window')
+  const originalWindow = globalThis.window
+  const permitted = ['Expenses:Food', 'Income:Refund']
+  try {
+    globalThis.window = { __TAURI_INTERNALS__: { invoke: async () => [{ line_num: 3, permitted_categories: permitted }] } }
+    const rows = await getPendingLedger()
+    assert.deepEqual(rows[0].permitted_categories, permitted)
   } finally {
     if (hadWindow) globalThis.window = originalWindow
     else delete globalThis.window

@@ -57,11 +57,11 @@ export default function LedgerReviewWidget() {
       {!loading && !error && pending.length === 0 && <div className="p-8 border border-white/5 bg-zinc-900/60 rounded text-center text-white/50 font-mono text-sm">No pending transactions in Sovereign.beancount</div>}
       {pending.length > 0 && <div className="grid grid-cols-1 gap-4">
         {pending.map((tx) => {
-          const key = transactionKey(tx); const approving = Boolean(busy[key]);
+          const key = transactionKey(tx); const approving = Boolean(busy[key]); const permitted = tx.permitted_categories ?? categories;
           return <div key={key} className="p-4 bg-zinc-950 border border-white/10 rounded group hover:border-accent/30 transition-all flex justify-between items-center">
             <div><div className="text-[10px] font-mono text-white/40 mb-1">{tx.date}</div><div className="text-sm font-bold text-white tracking-wider">{tx.payee}</div><div className={`text-lg font-mono font-bold ${compareMoney(tx.amount, '0') < 0 ? 'text-green-400' : 'text-red-400'}`}>{formatMoney(negateMoney(tx.amount), tx.currency)}</div></div>
-            <div className="flex items-center gap-4"><div className="flex flex-col gap-1"><label className="text-[9px] uppercase font-bold text-white/40 tracking-widest">AI Categorization</label><CategorySelector value={tx.category} onChange={(value) => handleCategoryChange(key, value)} categories={categories} /></div>
-              <button disabled={approving || loading} onClick={() => handleApprove(tx)} className="px-6 py-2 bg-accent/10 border border-accent/50 text-accent font-bold uppercase text-xs tracking-widest rounded hover:bg-accent hover:text-black transition-all disabled:opacity-50">{approving ? 'Approving…' : 'Approve'}</button>
+            <div className="flex items-center gap-4"><div className="flex flex-col gap-1"><label className="text-[9px] uppercase font-bold text-white/40 tracking-widest">AI Categorization</label><CategorySelector value={tx.category} onChange={(value) => handleCategoryChange(key, value)} categories={permitted} disabled={approving || loading || !permitted.length} />{!permitted.length && <span className="text-[10px] text-red-300">No eligible open category; review manually.</span>}</div>
+              <button disabled={approving || loading || !permitted.includes(tx.category)} onClick={() => handleApprove(tx)} className="px-6 py-2 bg-accent/10 border border-accent/50 text-accent font-bold uppercase text-xs tracking-widest rounded hover:bg-accent hover:text-black transition-all disabled:opacity-50">{approving ? 'Approving…' : 'Approve'}</button>
             </div>
           </div>;
         })}

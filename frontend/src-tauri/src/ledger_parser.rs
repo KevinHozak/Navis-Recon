@@ -112,7 +112,7 @@ fn decode_ledger(path: &str, bytes: Vec<u8>) -> Result<String, String> {
 pub(crate) fn parse_error_message(path: &str, diagnostics: Vec<String>) -> String {
     format!("partial: {path}: {}", diagnostics.join("; "))
 }
-fn valid_date(s: &str) -> bool {
+pub(crate) fn valid_date(s: &str) -> bool {
     let b = s.as_bytes();
     if b.len() != 10
         || b[4] != b'-'
@@ -141,7 +141,7 @@ fn valid_date(s: &str) -> bool {
     };
     y > 0 && d > 0 && d <= days
 }
-fn account_ok(s: &str) -> bool {
+pub(crate) fn account_ok(s: &str) -> bool {
     let mut parts = s.split(':');
     matches!(
         parts.next(),

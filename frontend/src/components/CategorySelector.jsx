@@ -2,12 +2,15 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { canSelectCategory, selectableCategories } from './categorySelectorState';
 
-export default function CategorySelector({ value, onChange, categories = [] }) {
+export default function CategorySelector({ value, onChange, categories = [], disabled = false }) {
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState('');
   const wrapperRef = useRef(null);
   const inputRef = useRef(null);
+  const focusTimer = useRef(null);
+  useEffect(() => () => clearTimeout(focusTimer.current), []);
 
   useEffect(() => {
     function handleClickOutside(event) {
@@ -21,36 +24,36 @@ export default function CategorySelector({ value, onChange, categories = [] }) {
 
   // When opening, reset search to empty or current value if we want to filter by current
   const handleOpen = () => {
+    if (disabled || categories.length === 0) return;
     setSearch('');
     setIsOpen(true);
-    setTimeout(() => {
+    clearTimeout(focusTimer.current);
+    focusTimer.current = setTimeout(() => {
       if (inputRef.current) inputRef.current.focus();
     }, 50);
   };
 
   const handleSelect = (cat) => {
+    if (!canSelectCategory(cat, categories, disabled)) return;
     onChange(cat);
     setIsOpen(false);
   };
 
-  const filteredCategories = categories.filter(cat => 
-    cat.toLowerCase().includes(search.toLowerCase())
-  );
+  const filteredCategories = selectableCategories(categories, search);
 
   return (
     <div className="relative" ref={wrapperRef}>
       {/* Display Button / Input Trigger */}
-      <div 
-        onClick={handleOpen}
-        className="bg-black border border-white/10 p-2 rounded text-xs text-white/80 font-mono w-64 hover:border-accent cursor-pointer flex justify-between items-center transition-colors"
+      <button type="button" disabled={disabled || categories.length === 0} onClick={handleOpen}
+        className="bg-black border border-white/10 p-2 rounded text-xs text-white/80 font-mono w-64 hover:border-accent disabled:opacity-40 disabled:cursor-not-allowed flex justify-between items-center transition-colors"
       >
         <span className="truncate">{value || "Select Category..."}</span>
         <span className="text-white/30 text-[10px]">▼</span>
-      </div>
+      </button>
 
       {/* Popover Menu */}
       <AnimatePresence>
-        {isOpen && (
+        {isOpen && !disabled && (
           <motion.div
             initial={{ opacity: 0, y: -5 }}
             animate={{ opacity: 1, y: 0 }}
@@ -78,17 +81,17 @@ export default function CategorySelector({ value, onChange, categories = [] }) {
                 </div>
               ) : (
                 filteredCategories.map(cat => (
-                  <div
+                  <button type="button"
                     key={cat}
                     onClick={() => handleSelect(cat)}
-                    className="p-2 px-3 text-xs font-mono text-white/70 hover:bg-accent/20 hover:text-white cursor-pointer transition-colors border-b border-white/5 last:border-0 truncate"
+                    className="w-full text-left p-2 px-3 text-xs font-mono text-white/70 hover:bg-accent/20 hover:text-white cursor-pointer transition-colors border-b border-white/5 last:border-0 truncate"
                     title={cat}
                   >
                     {/* Visual trick: slightly indent sub-categories based on colon count */}
                     <span style={{ paddingLeft: `${(cat.split(':').length - 1) * 6}px` }}>
                       {cat.split(':').pop()} <span className="text-[9px] text-white/20 ml-2">{cat}</span>
                     </span>
-                  </div>
+                  </button>
                 ))
               )}
             </div>
