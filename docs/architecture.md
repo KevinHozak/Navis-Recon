@@ -39,7 +39,7 @@ The ultimate source of truth is stored in the Navis-Vault ledger manifold:
 * **Ledger File:** `C:/Example/Sovereign.beancount`
 * **Audit Checklist:** `C:/Example/checklist.json`
 
-All ledger and checklist mutations use atomic write patterns (`.tmp` staging with native Windows `MoveFileExW` replacement flags) to guarantee zero corruption or partial writes across cloud sync cycles.
+Checklist mutations use atomic replacement. Ledger review approvals use an app-wide serialized read/compare/write through the open source file handle; they do not use fixed-name staging files. On Windows the handle denies other opens requesting write or delete access until the write completes. Before changing bytes, the writer creates a unique same-directory recovery copy and flushes it with `sync_all`; caught errors trigger restoration through the still-exclusive handle. The in-place ledger write is not crash-atomic. Ledger approvals fail closed on non-Windows platforms because external writers cannot be excluded there.
 
 ---
 
@@ -48,9 +48,9 @@ All ledger and checklist mutations use atomic write patterns (`.tmp` staging wit
 All ledger evaluation, line modifications, checklist operations, and sync orchestration are implemented natively in Rust via Tauri IPC commands.
 
 ### 1. Ledger Review & Triage (`ledger_review.rs`)
-* `get_pending_ledger`: Scans `Sovereign.beancount` line by line for transactions marked with the ` ! ` flag. Extracts date, payee, narration, suggested expense category, amount, and source line number.
+* `get_pending_ledger`: Scans `Sovereign.beancount` line by line for transactions marked with the ` ! ` flag. Each row carries a SHA-256 identity of its complete raw transaction block, its source line, and a SHA-256 revision of the whole raw ledger. Identical duplicate transactions remain distinct by line plus identity.
 * `get_ledger_categories`: Scans `open Expenses:` and `open Income:` directives to compile an alphabetical, deduplicated list of valid categories for autocomplete.
-* `approve_ledger_transaction`: Safely modifies the transaction on disk by replacing the ` ! ` flag with ` * ` and updating the posting line's category. Uses atomic file replacement to preserve original whitespace, comments, and structure.
+* `approve_ledger_transaction`: Requires line number, transaction identity, whole-ledger revision, and category. Under an app-wide approval lock it opens the source for exclusive Windows sharing, verifies the revision and exact pending transaction block, then changes only the flag and first supported direct posting's account token. Any stale revision rejects the write and the UI retains the row with a refresh action. The complete pending list is refreshed after a successful approval because the revision changes. Complex posting selection belongs to RECON-S005. Before writing, a unique recovery copy is created and synced beside the ledger; caught write errors restore original bytes. Writes preserve unrelated bytes and line endings, but are not crash-atomic. Approvals are supported only on Windows desktop.
 
 ### 2. Ledger Parsing & Telemetry (`ledger_parser.rs`)
 The native reader implements a deliberately small Beancount subset with exact decimal accounting. It accepts blank lines, full-line comments beginning with `;`, a fully quoted `option "title" "..."`, dated `YYYY-MM-DD open ACCOUNT [UNIT]` directives, and dated transactions with one or two quoted descriptions. Header and option tokens require whitespace separators. Quoted text cannot contain escaped quotes or backslashes; inline comments are accepted only as standalone comment lines, not trailing posting/header comments.

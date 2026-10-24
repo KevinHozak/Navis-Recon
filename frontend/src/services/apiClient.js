@@ -71,13 +71,13 @@ export function getLedgerCategories() {
   })
 }
 
-export function approveLedgerTransaction(lineNum, category) {
+export function approveLedgerTransaction(lineNum, transactionId, ledgerRevision, category) {
   return request('/api/ledger/approve', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ line_num: lineNum, category }),
+    body: JSON.stringify({ line_num: lineNum, transaction_id: transactionId, ledger_revision: ledgerRevision, category }),
     ipcCommand: 'approve_ledger_transaction',
-    ipcArgs: { lineNum, category },
+    ipcArgs: { lineNum, transactionId, ledgerRevision, category },
   })
 }
 
