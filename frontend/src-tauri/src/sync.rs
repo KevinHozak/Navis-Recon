@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::Digest;
+#[cfg(test)]
+use std::io::Write;
 use std::{
-    io::{BufRead, BufReader, Write},
+    collections::HashMap,
+    io::{BufRead, BufReader},
     process::{Command, Stdio},
     sync::{Arc, Mutex, OnceLock},
 };
@@ -41,6 +44,10 @@ pub struct SyncRun {
     errors: Vec<Value>,
     eligible_match_ids: Vec<String>,
     result: Option<Value>,
+    #[serde(default)]
+    managed_outcomes: Vec<crate::managed_import::ItemOutcome>,
+    #[serde(default)]
+    operation_kind: Option<String>,
 }
 
 impl Default for SyncRun {
@@ -57,6 +64,8 @@ impl Default for SyncRun {
             errors: vec![],
             eligible_match_ids: vec![],
             result: None,
+            managed_outcomes: vec![],
+            operation_kind: None,
         }
     }
 }
@@ -65,11 +74,85 @@ impl Default for SyncRun {
 struct Coordinator {
     current: Mutex<SyncRun>,
     next_id: Mutex<u64>,
+    plans: Mutex<HashMap<String, crate::managed_import::PreparedPlan>>,
+    import_config: Mutex<Option<crate::managed_import::ImportConfig>>,
 }
 
 impl Coordinator {
     fn snapshot(&self) -> SyncRun {
         self.current.lock().unwrap().clone()
+    }
+    fn reserve_analysis(
+        &self,
+        cfg: crate::managed_import::ImportConfig,
+    ) -> Result<SyncRun, String> {
+        let mut run = self
+            .current
+            .lock()
+            .map_err(|_| "Sync coordinator unavailable")?;
+        if !matches!(
+            run.status,
+            Phase::Idle | Phase::Complete | Phase::Failed | Phase::Cancelled
+        ) {
+            return Err(format!("Cannot start while sync run is {:?}", run.status));
+        }
+        let mut config = self
+            .import_config
+            .lock()
+            .map_err(|_| "Managed configuration unavailable")?;
+        let mut plans = self.plans.lock().map_err(|_| "Managed plans unavailable")?;
+        let mut n = self
+            .next_id
+            .lock()
+            .map_err(|_| "Sync coordinator unavailable")?;
+        *n += 1;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let revision = run.revision + 1;
+        *run = SyncRun {
+            run_id: Some(format!("sync-{}-{timestamp}-{n}", std::process::id())),
+            revision,
+            sequence: 0,
+            status: Phase::Analyzing,
+            ..SyncRun::default()
+        };
+        *config = Some(cfg);
+        plans.clear();
+        Ok(run.clone())
+    }
+    fn reserve_retry(&self) -> Result<SyncRun, String> {
+        let mut run = self
+            .current
+            .lock()
+            .map_err(|_| "Sync coordinator unavailable")?;
+        if !matches!(
+            run.status,
+            Phase::Idle | Phase::Complete | Phase::Failed | Phase::Cancelled
+        ) {
+            return Err(format!("Cannot retry while sync run is {:?}", run.status));
+        }
+        let mut n = self
+            .next_id
+            .lock()
+            .map_err(|_| "Sync coordinator unavailable")?;
+        *n += 1;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let revision = run.revision + 1;
+        *run = SyncRun {
+            run_id: Some(format!("sync-{}-{timestamp}-{n}", std::process::id())),
+            revision,
+            sequence: 0,
+            status: Phase::Committing,
+            analysis_outcome: Some(AnalysisOutcome::Success),
+            operation_kind: Some("managed_retry".into()),
+            ..SyncRun::default()
+        };
+        Ok(run.clone())
     }
     fn reserve(&self, phase: Phase) -> Result<SyncRun, String> {
         let mut run = self.current.lock().unwrap();
@@ -137,6 +220,19 @@ impl Coordinator {
             {
                 return None;
             }
+            if let Some(cfg) = self.import_config.lock().ok()?.as_ref() {
+                match crate::managed_import::prepare(&data, cfg) {
+                    Ok(plan) => {
+                        self.plans
+                            .lock()
+                            .ok()?
+                            .insert(data["match_id"].as_str()?.to_owned(), plan);
+                    }
+                    Err(message) => run
+                        .errors
+                        .push(json!({"filename":data["filename"], "message":message})),
+                }
+            }
         }
         match event {
             "log" => run.logs.push(data.clone()),
@@ -198,6 +294,7 @@ impl Coordinator {
                 .as_object_mut()
                 .ok_or("Malformed stored match")?
                 .remove("match_id");
+            resolved["_managed_item_id"] = json!(match_id);
             selected.push(resolved);
             selected_ids.push(match_id.clone());
         }
@@ -205,6 +302,81 @@ impl Coordinator {
         run.sequence += 1;
         run.revision += 1;
         Ok((run.clone(), selected))
+    }
+    fn begin_managed_commit(
+        &self,
+        id: &str,
+        ids: &[String],
+    ) -> Result<
+        (
+            SyncRun,
+            Vec<(String, crate::managed_import::PreparedPlan)>,
+            crate::managed_import::ImportConfig,
+        ),
+        String,
+    > {
+        if ids.is_empty() {
+            return Err("Select at least one match to commit".into());
+        }
+        let mut run = self
+            .current
+            .lock()
+            .map_err(|_| "Sync coordinator unavailable")?;
+        if run.run_id.as_deref() != Some(id) || run.status != Phase::Review {
+            return Err("Sync run is no longer in review".into());
+        }
+        if !matches!(
+            run.analysis_outcome,
+            Some(AnalysisOutcome::Success | AnalysisOutcome::Partial)
+        ) {
+            return Err("Sync analysis has no positive outcome and cannot be committed".into());
+        }
+        let cfg = self
+            .import_config
+            .lock()
+            .map_err(|_| "Managed configuration unavailable")?
+            .as_ref()
+            .cloned()
+            .ok_or("Managed configuration unavailable")?;
+        let plans = self.plans.lock().map_err(|_| "Managed plans unavailable")?;
+        let selected = ids
+            .iter()
+            .map(|item_id| {
+                plans
+                    .get(item_id)
+                    .cloned()
+                    .map(|plan| (item_id.clone(), plan))
+                    .ok_or("A selected match has no valid analysis-time prepared plan")
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len() {
+            return Err("Commit selection contains duplicate items".into());
+        }
+        for item_id in ids {
+            if !run.eligible_match_ids.contains(item_id) {
+                return Err(
+                    "Commit selection does not belong to this run's analysis results".into(),
+                );
+            }
+        }
+        run.status = Phase::Committing;
+        run.sequence += 1;
+        run.revision += 1;
+        Ok((run.clone(), selected, cfg))
+    }
+    #[cfg(test)]
+    fn approved_config(&self) -> Result<crate::managed_import::ImportConfig, String> {
+        let cfg = self
+            .import_config
+            .lock()
+            .map_err(|_| "Managed configuration unavailable")?;
+        let cfg = cfg.as_ref().ok_or("Managed configuration unavailable")?;
+        Ok(cfg.clone())
+    }
+    fn configure_import(&self, cfg: crate::managed_import::ImportConfig) {
+        if let Ok(mut slot) = self.import_config.lock() {
+            *slot = Some(cfg);
+        }
     }
     fn cancel_review(&self, id: &str) -> Result<SyncRun, String> {
         let mut run = self.current.lock().unwrap();
@@ -235,11 +407,11 @@ fn valid_match(value: &Value) -> bool {
         && value
             .get("filename")
             .and_then(Value::as_str)
-            .is_some_and(|v| !v.trim().is_empty())
+            .is_some_and(crate::managed_import::safe_name)
         && value
             .get("new_name")
             .and_then(Value::as_str)
-            .is_some_and(|v| !v.trim().is_empty())
+            .is_some_and(crate::managed_import::safe_name)
 }
 
 fn refresh_eligible(run: &mut SyncRun) {
@@ -263,10 +435,14 @@ fn refresh_eligible(run: &mut SyncRun) {
         .chain(run.unmatched.iter())
         .filter_map(|item| item.get("filename").and_then(Value::as_str))
         .collect();
-    let mut counts = std::collections::HashMap::<&str, usize>::new();
+    let mut counts = std::collections::HashMap::<String, usize>::new();
+    let mut destination_counts = std::collections::HashMap::<String, usize>::new();
     for item in &run.matches {
         if let Some(filename) = item.get("filename").and_then(Value::as_str) {
-            *counts.entry(filename).or_default() += 1;
+            *counts.entry(filename.to_lowercase()).or_default() += 1;
+        }
+        if let Some(name) = item.get("new_name").and_then(Value::as_str) {
+            *destination_counts.entry(name.to_lowercase()).or_default() += 1;
         }
     }
     run.eligible_match_ids = run
@@ -274,8 +450,12 @@ fn refresh_eligible(run: &mut SyncRun) {
         .iter()
         .filter_map(|item| {
             let filename = item.get("filename")?.as_str()?;
+            let destination = item.get("new_name")?.as_str()?;
             let id = item.get("match_id")?.as_str()?;
-            (!blocked.contains(filename) && counts.get(filename) == Some(&1)).then(|| id.to_owned())
+            (!blocked.contains(filename)
+                && counts.get(&filename.to_lowercase()) == Some(&1)
+                && destination_counts.get(&destination.to_lowercase()) == Some(&1))
+            .then(|| id.to_owned())
         })
         .collect();
 }
@@ -407,7 +587,7 @@ fn parse_line(c: &Coordinator, sink: &dyn EventSink, id: &str, line: &str) -> bo
             sink,
             id,
             "error",
-            json!({"message":"Malformed match: filename and new_name must be nonempty strings", "filename":payload.get("filename").cloned().unwrap_or(Value::Null), "protocol_error":true}),
+            json!({"message":"Malformed match metadata was rejected", "protocol_error":true}),
         );
         return true;
     }
@@ -566,6 +746,7 @@ fn analyze_worker(
     }
 }
 
+#[cfg(test)]
 fn commit_worker(
     coordinator: Arc<Coordinator>,
     sink: &dyn EventSink,
@@ -739,9 +920,71 @@ pub fn get_sync_run() -> SyncRun {
 }
 
 #[tauri::command]
+pub fn get_sync_outcomes() -> Vec<crate::managed_import::ItemOutcome> {
+    crate::managed_import::outcomes(crate::config::get("ledger_path"))
+}
+
+/// Reconcile durable native imports against their journal, archive, source,
+/// recovery copy, and the current ledger. The response uses ItemOutcome fields.
+#[tauri::command]
+pub fn reconcile_ledger_sync() -> Vec<crate::managed_import::ItemOutcome> {
+    crate::managed_import::outcomes(crate::config::get("ledger_path"))
+}
+
+/// Retry only durable operation IDs returned as retry_safe by reconciliation.
+#[tauri::command]
+pub fn retry_ledger_sync(app: AppHandle, operation_ids: Vec<String>) -> Result<SyncRun, String> {
+    if operation_ids.is_empty() {
+        return Err("Select at least one safe managed operation".into());
+    }
+    if operation_ids
+        .iter()
+        .any(|id| id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()))
+        || operation_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != operation_ids.len()
+    {
+        return Err("Retry selection contains an invalid operation ID".into());
+    }
+    let c = coordinator();
+    let run = c.reserve_retry()?;
+    let id = run.run_id.clone().unwrap();
+    let expected_count = operation_ids.len();
+    publish_state(&app, &run);
+    tauri::async_runtime::spawn_blocking(move || {
+        let outcomes = crate::managed_import::retry_operations(operation_ids);
+        let success = outcomes.len() == expected_count
+            && !outcomes.is_empty()
+            && outcomes.iter().all(|item| item.state == "succeeded");
+        {
+            let mut state = c.current.lock().unwrap();
+            if state.run_id.as_deref() == Some(&id) && state.status == Phase::Committing {
+                state.managed_outcomes = outcomes.clone();
+            }
+        }
+        terminal(
+            &c,
+            &app,
+            &id,
+            Phase::Committing,
+            if success {
+                Phase::Complete
+            } else {
+                Phase::Failed
+            },
+            json!({"status":if success {"success"} else {"error"},"managed_outcomes":outcomes,"operation_kind":"managed_retry"}),
+        );
+    });
+    Ok(run)
+}
+
+#[tauri::command]
 pub fn start_ledger_sync(app: AppHandle) -> Result<SyncRun, String> {
     let c = coordinator();
-    let run = c.reserve(Phase::Analyzing)?;
+    let cfg = crate::managed_import::runtime_config()?;
+    let run = c.reserve_analysis(cfg)?;
     let id = run.run_id.clone().unwrap();
     publish_state(&app, &run);
     let program = "python".to_owned();
@@ -760,15 +1003,32 @@ pub fn commit_ledger_sync(
     payload: Vec<String>,
 ) -> Result<SyncRun, String> {
     let c = coordinator();
-    let (run, original) = c.begin_commit(&run_id, &payload)?;
+    let (run, plans, cfg) = c.begin_managed_commit(&run_id, &payload)?;
     let id = run_id;
     publish_state(&app, &run);
-    let args = vec![
-        crate::config::get("harvester_script").to_owned(),
-        "--commit".into(),
-    ];
     tauri::async_runtime::spawn_blocking(move || {
-        commit_worker(c, &app, &id, "python", &args, original)
+        let outcomes = crate::managed_import::commit_prepared(plans, &id, cfg);
+        let success = outcomes.len() == payload.len()
+            && !outcomes.is_empty()
+            && outcomes.iter().all(|o| o.state == "succeeded");
+        {
+            let mut state = c.current.lock().unwrap();
+            if state.run_id.as_deref() == Some(&id) && state.status == Phase::Committing {
+                state.managed_outcomes = outcomes.clone();
+            }
+        }
+        terminal(
+            &c,
+            &app,
+            &id,
+            Phase::Committing,
+            if success {
+                Phase::Complete
+            } else {
+                Phase::Failed
+            },
+            json!({"status":if success {"success"} else {"error"},"managed_outcomes":outcomes}),
+        );
     });
     Ok(run)
 }
@@ -876,6 +1136,91 @@ mod tests {
         (stored["match_id"].as_str().unwrap().to_owned(), stored)
     }
 
+    fn test_import_config(
+        root: &std::path::Path,
+        label: &str,
+    ) -> (
+        crate::managed_import::ImportConfig,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let inbox = root.join(format!("inbox-{label}"));
+        let archive = root.join(format!("archive-{label}"));
+        let store = root.join(format!("store-{label}"));
+        let ledger = root.join(format!("ledger-{label}.beancount"));
+        fs::create_dir_all(&inbox).unwrap();
+        fs::create_dir_all(&archive).unwrap();
+        fs::create_dir_all(&store).unwrap();
+        fs::write(&ledger, "; test ledger\n").unwrap();
+        let cfg = crate::managed_import::ImportConfig::injected(
+            fs::canonicalize(inbox.clone()).unwrap(),
+            fs::canonicalize(archive).unwrap(),
+            fs::canonicalize(ledger.clone()).unwrap(),
+            fs::canonicalize(store).unwrap(),
+            "USD".into(),
+            "Assets:Bank:Checking".into(),
+        );
+        (cfg, inbox, ledger)
+    }
+
+    #[test]
+    fn configured_analysis_reservation_is_atomic_across_active_phases() {
+        let temp = TempDir::new();
+        let (first_cfg, first_inbox, first_ledger) = test_import_config(&temp.0, "first");
+        let (other_cfg, _, _) = test_import_config(&temp.0, "other");
+        fs::write(first_inbox.join("statement.pdf"), b"statement").unwrap();
+        let c = Coordinator::default();
+        let first = c.reserve_analysis(first_cfg.clone()).unwrap();
+        let id = first.run_id.clone().unwrap();
+        let match_data = json!({"filename":"statement.pdf","new_name":"Institution 2026-10-23.pdf","date":"2026-10-23","rule":"Groceries","category":"Expenses:Food","amount":"12.34","was_encrypted":false,"is_cleared":true});
+        let (stored, _) = c.event(&id, "match", match_data).unwrap();
+        let before = stored.clone();
+        let plan_keys = c.plans.lock().unwrap().keys().cloned().collect::<Vec<_>>();
+        assert_eq!(plan_keys.len(), 1);
+        assert!(c.reserve_analysis(other_cfg.clone()).is_err());
+        assert_eq!(c.snapshot().revision, before.revision);
+        assert_eq!(c.snapshot().status, Phase::Analyzing);
+        assert_eq!(
+            c.approved_config().unwrap().test_ledger().to_path_buf(),
+            fs::canonicalize(first_ledger.clone()).unwrap()
+        );
+        assert_eq!(
+            c.plans.lock().unwrap().keys().cloned().collect::<Vec<_>>(),
+            plan_keys
+        );
+        c.transition(&id, Phase::Review).unwrap();
+        assert!(c.reserve_analysis(other_cfg.clone()).is_err());
+        assert_eq!(
+            c.approved_config().unwrap().test_ledger().to_path_buf(),
+            fs::canonicalize(first_ledger.clone()).unwrap()
+        );
+        {
+            c.current.lock().unwrap().status = Phase::Committing;
+        }
+        assert!(c.reserve_analysis(other_cfg).is_err());
+        assert_eq!(
+            c.approved_config().unwrap().test_ledger().to_path_buf(),
+            fs::canonicalize(first_ledger.clone()).unwrap()
+        );
+        assert_eq!(c.plans.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn retry_reservation_uses_run_ownership_and_rejects_review_or_active_runs() {
+        let c = Coordinator::default();
+        let retry = c.reserve_retry().unwrap();
+        assert_eq!(retry.status, Phase::Committing);
+        assert_eq!(retry.operation_kind.as_deref(), Some("managed_retry"));
+        assert!(c.reserve_retry().is_err());
+        c.transition(retry.run_id.as_deref().unwrap(), Phase::Failed)
+            .unwrap();
+        let analysis = c.reserve(Phase::Analyzing).unwrap();
+        c.transition(analysis.run_id.as_deref().unwrap(), Phase::Review)
+            .unwrap();
+        assert!(c.reserve_retry().is_err());
+        assert_eq!(c.snapshot().status, Phase::Review);
+    }
+
     #[test]
     fn analysis_reservation_rejects_duplicate_and_review_blocks_new_run() {
         let c = Arc::new(Coordinator::default());
@@ -972,7 +1317,9 @@ mod tests {
         let resolved = c.begin_commit(&id, &[backend_id.clone()]).unwrap().1;
         assert_eq!(
             resolved,
-            vec![json!({"filename":"synthetic.pdf","new_name":"renamed.pdf"})]
+            vec![
+                json!({"filename":"synthetic.pdf","new_name":"renamed.pdf","_managed_item_id":backend_id})
+            ]
         );
         assert!(resolved[0].get("match_id").is_none());
         let other = Coordinator::default();
@@ -1258,6 +1605,52 @@ mod tests {
                 &[snapshot.matches[0]["match_id"].as_str().unwrap().to_owned()]
             )
             .is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fake_analyzer_captures_private_prepared_plan_and_source_change_is_rejected() {
+        let temp = TempDir::new();
+        let inbox = temp.0.join("inbox");
+        let archive = temp.0.join("archive");
+        let store = temp.0.join("private");
+        fs::create_dir_all(&inbox).unwrap();
+        fs::create_dir_all(&archive).unwrap();
+        fs::create_dir_all(&store).unwrap();
+        fs::write(inbox.join("synthetic.pdf"), b"synthetic statement").unwrap();
+        let ledger = temp.0.join("synthetic.beancount");
+        fs::write(&ledger, "; synthetic ledger\n").unwrap();
+        let cfg = crate::managed_import::ImportConfig::injected(
+            fs::canonicalize(inbox.clone()).unwrap(),
+            fs::canonicalize(archive.clone()).unwrap(),
+            fs::canonicalize(ledger.clone()).unwrap(),
+            fs::canonicalize(store).unwrap(),
+            "USD".into(),
+            "Assets:Bank:Checking".into(),
+        );
+        let script = temp.script("import json\nprint(json.dumps({'type':'match','filename':'synthetic.pdf','new_name':'Bank 2026-10-23.pdf','date':'2026-10-23','rule':'Groceries','category':'Expenses:Food','amount':'12.34','was_encrypted':False,'is_cleared':True}))\n");
+        let coordinator = Arc::new(Coordinator::default());
+        coordinator.configure_import(cfg.clone());
+        let id = start(&coordinator).run_id.unwrap();
+        analyze_worker(
+            coordinator.clone(),
+            &FakeSink::default(),
+            &id,
+            &python(),
+            &[script],
+        );
+        let review = coordinator.snapshot();
+        assert_eq!(review.status, Phase::Review);
+        assert_eq!(review.eligible_match_ids.len(), 1);
+        let match_id = review.eligible_match_ids[0].clone();
+        fs::write(inbox.join("synthetic.pdf"), b"substituted after review").unwrap();
+        let (_, plans, cfg) = coordinator.begin_managed_commit(&id, &[match_id]).unwrap();
+        let before = fs::read(&ledger).unwrap();
+        let outcomes = crate::managed_import::commit_prepared(plans, &id, cfg);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].state, "failed");
+        assert_eq!(fs::read(&ledger).unwrap(), before);
+        assert!(!archive.join("Statements 2026/Bank 2026-10-23.pdf").exists());
     }
 
     #[test]

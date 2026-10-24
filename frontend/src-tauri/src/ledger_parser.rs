@@ -218,7 +218,10 @@ fn plain_decimal(s: &str) -> Option<Money> {
     }
     Money::parse(s).ok()
 }
-fn parse_with_currency(contents: &str, currency: &str) -> Result<Vec<Transaction>, Vec<String>> {
+pub(crate) fn parse_with_currency(
+    contents: &str,
+    currency: &str,
+) -> Result<Vec<Transaction>, Vec<String>> {
     let lines: Vec<_> = contents.lines().collect();
     let mut txs = vec![];
     let mut errs = vec![];

@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createSyncRunController as makeSyncRunController, createSelectionStore } from './syncRunController.js'
-import { canAbandonReview, canCommitReview, canStartRun, canToggleMatch, showsReview } from './syncRunView.js'
+import { canAbandonReview, canCommitReview, canStartRun, canToggleMatch, managedOutcomes, retryableManagedItems, showsReview } from './syncRunView.js'
 
 const deferred = () => { let resolve, reject; const promise = new Promise((r, j) => { resolve = r; reject = j }); return { promise, resolve, reject } }
 const snapshot = (run_id, revision, status = 'idle') => ({ run_id, revision, sequence: revision, status, analysis_outcome: status === 'review' || status === 'committing' || status === 'complete' ? 'success' : status === 'failed' || status === 'cancelled' ? 'failed' : null, logs: [], matches: [], unmatched: [], errors: [], result: null })
@@ -273,4 +273,58 @@ test('malformed initial snapshot fails closed and stale event envelopes are reje
   assert.equal(controller.getState().run, null)
   assert.equal(await controller.start(), false)
   controller.dispose()
+})
+
+test('restart snapshot hydrates partial managed outcomes and only backend classified failures are retryable', async () => {
+  const saved = [
+    { item_id: 'done', filename: 'a.pdf', state: 'succeeded', retry_safe: false, message: 'Imported', operation_id: 'a'.repeat(64) },
+    { item_id: 'safe', filename: 'b.pdf', state: 'failed', retry_safe: true, message: 'No effects', operation_id: 'b'.repeat(64) },
+    { item_id: 'uncertain', filename: 'c.pdf', state: 'uncertain', retry_safe: true, message: 'Verify manually', operation_id: 'c'.repeat(64) },
+  ]
+  const controller = createSyncRunController({ api: {
+    listenForSyncEvents: async () => () => {},
+    getSyncRun: async () => ({ ...snapshot(null, 0), revision: 1, managed_outcomes: saved }),
+  } })
+  assert.equal(await controller.connect(), true)
+  assert.deepEqual(managedOutcomes(controller.getState().run).map(item => item.item_id), ['done', 'safe', 'uncertain'])
+  assert.deepEqual(retryableManagedItems(controller.getState().run).map(item => item.item_id), ['safe'])
+  controller.dispose()
+})
+
+
+test('recovery hydrates while idle and refresh failures preserve the last verified list', async () => {
+  const item = { item_id:'x', filename:'x.pdf', state:'failed', retry_safe:true, message:'No effects', operation_id:'d'.repeat(64) }; let fail=false; let changes=[]
+  const controller=createSyncRunController({onChange:view=>changes.push(view),api:{listenForSyncEvents:async()=>()=>{},getSyncRun:async()=>snapshot(null,0),reconcileLedgerSync:async()=>{if(fail)throw new Error('store busy');return [item]}}})
+  await controller.connect(); assert.deepEqual(controller.getState().recovery,[item]); fail=true; assert.equal(await controller.refreshOutcomes(),false)
+  assert.deepEqual(controller.getState().recovery,[item]); assert.match(controller.getState().recoveryError.message,/store busy/); controller.dispose()
+})
+
+test('recovery request generations ignore stale refresh results and disposal', async () => {
+  const old=deferred(); const late=deferred(); let reads=0; const item=n=>({item_id:String(n),filename:`${n}.pdf`,state:'failed',retry_safe:false,message:'x',operation_id:String(n).repeat(64)})
+  const controller=createSyncRunController({api:{listenForSyncEvents:async()=>()=>{},getSyncRun:async()=>snapshot(null,0),reconcileLedgerSync:()=>++reads===1?Promise.resolve([item(0)]):reads===2?old.promise:reads===3?Promise.resolve([item(2)]):late.promise}})
+  await controller.connect(); const stale=controller.refreshOutcomes(); await controller.refreshOutcomes(); old.resolve([item(1)]); await stale; assert.equal(controller.getState().recovery[0].item_id,'2')
+  const pending=controller.refreshOutcomes(); const before=controller.getState().recovery; controller.dispose(); late.resolve([item(3)]); await pending; assert.deepEqual(controller.getState().recovery,before)
+})
+
+test('retry reserves one mutation, blocks competing actions and reconciles after rejection without retrying', async () => {
+  const gate=deferred(); let tries=0; let reads=0; const safe={item_id:'safe',filename:'x.pdf',state:'failed',retry_safe:true,message:'safe',operation_id:'e'.repeat(64)}
+  const idle=snapshot(null,1)
+  const api={listenForSyncEvents:async()=>()=>{},getSyncRun:async()=>++reads===1?idle:snapshot(null,4),reconcileLedgerSync:async()=>[safe],retryLedgerSync:()=>{tries++;return gate.promise},startLedgerSync:async()=>snapshot('new',5,'analyzing')}
+  const controller=createSyncRunController({api}); await controller.connect(); const retry=controller.retryOutcomes(); assert.equal(controller.getState().pending,true)
+  assert.equal(await controller.retryOutcomes(),false); assert.equal(await controller.start(),false); assert.equal(await controller.commit(['m']),false); assert.equal(await controller.cancel(),false)
+  gate.reject(new Error('transport unknown')); assert.equal(await retry,false); assert.equal(tries,1); assert.equal(controller.getState().pending,false); controller.dispose()
+})
+
+test('malformed durable outcome lists are explicit snapshot errors, not silently filtered', async () => {
+  const views=[]; const controller=createSyncRunController({onChange:view=>views.push(view),api:{listenForSyncEvents:async()=>()=>{},getSyncRun:async()=>({...snapshot(null,0),managed_outcomes:[{item_id:'x',filename:'x.pdf',state:'failed',retry_safe:true,message:'x',operation_id:'z'}]})}})
+  assert.equal(await controller.connect(),false); assert.match(views.at(-1).error.message,/malformed snapshot/); controller.dispose()
+})
+
+
+test('controller ignores selection toggles while a commit is pending', async () => {
+  const gate=deferred(); const review={...snapshot('review',2,'review'),matches:[{match_id:'m',filename:'a.pdf',new_name:'b.pdf'}],eligible_match_ids:['m']}
+  const views=[]; const controller=createSyncRunController({onChange:view=>views.push(view),api:{listenForSyncEvents:async()=>()=>{},getSyncRun:async()=>review,commitLedgerSync:()=>gate.promise}})
+  await controller.connect(); assert.deepEqual([...views.at(-1).selectedIds],['m'])
+  const committing=controller.commit(['m']); controller.toggle('m'); assert.deepEqual([...views.at(-1).selectedIds],['m'])
+  gate.resolve({...review,revision:3,sequence:3,status:'committing'}); await committing; controller.dispose()
 })

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { approveLedgerTransaction, getLedgerApprovalHistory, undoLedgerApproval, subscribeLedgerMutation, getLedgerSourceState, getLedgerSummary, getPendingLedger, startLedgerSync, commitLedgerSync, cancelSyncRun, registerSyncEventListeners } from './apiClient.js'
+import { approveLedgerTransaction, getLedgerApprovalHistory, undoLedgerApproval, subscribeLedgerMutation, getLedgerSourceState, getLedgerSummary, getPendingLedger, startLedgerSync, commitLedgerSync, cancelSyncRun, getSyncOutcomes, reconcileLedgerSync, retryLedgerSync, registerSyncEventListeners } from './apiClient.js'
 
 test('ledger API client preserves Tauri arguments and exact summary provenance at IPC boundary', async () => {
   const hadWindow = Object.hasOwn(globalThis, 'window')
@@ -147,4 +147,14 @@ test('sync event registration cleans partial and late listeners, suppresses call
   cleanup(); cleanup()
   assert.equal(lateRemoval, 1); assert.equal(seen, 0)
   assert.ok(aborts >= 3)
+})
+
+
+test('managed recovery APIs use exact native IPC mappings and reject desktop fallback', async () => {
+  const hadWindow=Object.hasOwn(globalThis,'window'); const original=globalThis.window; const calls=[]; const ids=['f'.repeat(64)]
+  try { globalThis.window={__TAURI_INTERNALS__:{invoke:async(command,args)=>{calls.push({command,args}); return []}}}; await getSyncOutcomes(); await reconcileLedgerSync(); await retryLedgerSync(ids)
+    assert.deepEqual(calls,[{command:'get_sync_outcomes',args:{}},{command:'reconcile_ledger_sync',args:{}},{command:'retry_ledger_sync',args:{operationIds:ids}}])
+    await assert.rejects(retryLedgerSync(['bad']),/valid durable operation IDs/)
+    globalThis.window={}; await assert.rejects(getSyncOutcomes(),/requires the Tauri desktop shell/); await assert.rejects(reconcileLedgerSync(),/requires the Tauri desktop shell/); await assert.rejects(retryLedgerSync(ids),/requires the Tauri desktop shell/)
+  } finally { if(hadWindow)globalThis.window=original;else delete globalThis.window }
 })

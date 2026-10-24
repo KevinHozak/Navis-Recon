@@ -45,6 +45,8 @@ fn default_value(key: &str) -> &'static str {
         "inventory_path" => "data/Records/inventory.json",
         "statements_path" => "data/Ledger/Statements",
         "statement_archive_path" => "data/Statements",
+        "sync_inbox_path" => "data/Statements/Inbox",
+        "sync_counter_account" => "Assets:Bank:Checking",
         "harvester_script" => "scripts/finance_processor.py",
         "retirement_401k_account" => "Assets:Retirement:401k",
         "ira_primary_account" => "Assets:Retirement:IRA:Primary",

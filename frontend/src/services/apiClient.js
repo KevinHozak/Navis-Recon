@@ -161,6 +161,24 @@ export function cancelSyncRun(runId) {
   return invoke('cancel_sync_run', { runId })
 }
 
+// Managed import recovery is a native-only boundary because it reads and may
+// mutate the user's financial ledger and private receipt store.
+export function getSyncOutcomes() {
+  if (!isDesktopRuntime()) return Promise.reject(new Error('Managed import recovery requires the Tauri desktop shell.'))
+  return invoke('get_sync_outcomes')
+}
+
+export function reconcileLedgerSync() {
+  if (!isDesktopRuntime()) return Promise.reject(new Error('Managed import recovery requires the Tauri desktop shell.'))
+  return invoke('reconcile_ledger_sync')
+}
+
+export function retryLedgerSync(operationIds) {
+  if (!isDesktopRuntime()) return Promise.reject(new Error('Managed import recovery requires the Tauri desktop shell.'))
+  if (!Array.isArray(operationIds) || operationIds.some(id => typeof id !== 'string' || !/^[a-f0-9]{64}$/i.test(id))) return Promise.reject(new Error('Retry requires valid durable operation IDs.'))
+  return invoke('retry_ledger_sync', { operationIds })
+}
+
 export async function registerSyncEventListeners(handlers, listenFn, signal) {
   const unlisteners = []
   let disposed = false

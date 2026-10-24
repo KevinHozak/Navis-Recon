@@ -2,6 +2,7 @@ mod checklist;
 mod config;
 mod ledger_parser;
 mod ledger_review;
+mod managed_import;
 mod money;
 mod obligations;
 mod records;
@@ -36,6 +37,9 @@ pub fn run() {
             statements::open_statement_file,
             sync::start_ledger_sync,
             sync::get_sync_run,
+            sync::get_sync_outcomes,
+            sync::reconcile_ledger_sync,
+            sync::retry_ledger_sync,
             sync::commit_ledger_sync,
             sync::cancel_sync_run,
             ping

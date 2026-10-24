@@ -1,3 +1,5 @@
+import { sanitizeManagedOutcomes, validManagedOutcomes } from './syncRunView.js'
+
 const terminal = new Set(['complete', 'failed', 'cancelled'])
 const statuses = new Set(['idle', 'analyzing', 'review', 'committing', 'complete', 'failed', 'cancelled'])
 
@@ -41,7 +43,7 @@ function validRun(run) {
     new Set(run.matches.map(match => match?.match_id)).size === run.matches.length && run.matches.every(match => typeof match?.match_id === 'string' && match.match_id.length > 0 && typeof match.filename === 'string' && match.filename.length > 0 && typeof match.new_name === 'string' && match.new_name.length > 0) &&
     (run.eligible_match_ids === undefined || (Array.isArray(run.eligible_match_ids) && new Set(run.eligible_match_ids).size === run.eligible_match_ids.length && run.eligible_match_ids.every(id => run.matches.some(match => match.match_id === id)))) &&
     (!['review', 'committing', 'complete', 'cancelled'].includes(run.status) || ['success', 'partial'].includes(run.analysis_outcome)) &&
-    Object.hasOwn(run, 'result') && (run.result === null || (typeof run.result === 'object' && !Array.isArray(run.result))))
+    (run.managed_outcomes === undefined || validManagedOutcomes(run.managed_outcomes)) && Object.hasOwn(run, 'result') && (run.result === null || (typeof run.result === 'object' && !Array.isArray(run.result))))
 }
 
 export function createSyncRunController({ api, onChange = () => {}, selectionStore = sharedSelection }) {
@@ -54,13 +56,30 @@ export function createSyncRunController({ api, onChange = () => {}, selectionSto
   let generation = 0
   let ready = false
   let error = null
-  const publish = () => { if (!disposed) onChange({ run: state, pending, ready, selectedIds: selectionStore.values(state), ...(error ? { error } : {}) }) }
+  let recovery = []
+  let recoveryError = null
+  let recoveryRequest = 0
+  const publish = () => { if (!disposed) onChange({ run: state, pending, ready, recovery, recoveryError, selectedIds: selectionStore.values(state), ...(error ? { error } : {}) }) }
+
+  async function refreshOutcomes(current = generation) {
+    if (disposed || typeof api.reconcileLedgerSync !== 'function') return false
+    const request = ++recoveryRequest
+    try {
+      const items = await api.reconcileLedgerSync()
+      if (disposed || current !== generation || request !== recoveryRequest) return false
+      if (!validManagedOutcomes(items)) throw new Error('Sync service returned malformed managed outcomes.')
+      recovery = sanitizeManagedOutcomes(items); recoveryError = null; publish(); return true
+    } catch (failure) {
+      if (!disposed && current === generation && request === recoveryRequest) { recoveryError = failure; publish() }
+      return false
+    }
+  }
 
   function accept(next, current) {
     if (disposed || current !== generation || !validRun(next)) return false
     if (state && next.revision <= state.revision) return false
     if (next.run_id && !selectionStore.reconcile(next)) return false
-    state = next
+    state = next.managed_outcomes === undefined ? next : { ...next, managed_outcomes: sanitizeManagedOutcomes(next.managed_outcomes) }
     error = null
     publish()
     return true
@@ -89,6 +108,7 @@ export function createSyncRunController({ api, onChange = () => {}, selectionSto
       if (!validRun(initial)) throw new Error('Sync service returned a malformed snapshot.')
       if (!state || initial.revision > state.revision) accept(initial, current)
       ready = true; error = null; publish()
+      await refreshOutcomes(current)
       return true
     } catch (failure) {
       if (!disposed && current === generation) { ready = false; error = failure; publish() }
@@ -147,8 +167,18 @@ export function createSyncRunController({ api, onChange = () => {}, selectionSto
       return ready && state?.status === 'review' && ['success', 'partial'].includes(state.analysis_outcome) && valid ? invoke(() => api.commitLedgerSync(state.run_id, ids)) : Promise.resolve(false)
     },
     cancel: () => ready && state?.status === 'review' ? invoke(() => api.cancelSyncRun(state.run_id)) : Promise.resolve(false),
-    toggle(matchId) { if ((state?.status === 'analyzing' || state?.status === 'review') && (state.status !== 'review' || (state.eligible_match_ids || state.matches.map(match => match.match_id)).includes(matchId))) { selectionStore.toggle(state, matchId); publish() } },
+    refreshOutcomes: () => ready && !pending ? refreshOutcomes(generation) : Promise.resolve(false),
+    retryOutcomes() {
+      const safe = recovery.filter(item => item.state === 'failed' && item.retry_safe && typeof item.operation_id === 'string' && /^[a-f0-9]{64}$/i.test(item.operation_id)).map(item => item.operation_id)
+      if (!ready || pending || !safe.length || typeof api.retryLedgerSync !== 'function' || (state && !terminal.has(state.status) && state.status !== 'idle')) return Promise.resolve(false)
+      return invoke(async () => {
+        let result
+        try { result = await api.retryLedgerSync(safe) } finally { await refreshOutcomes(generation) }
+        return result
+      })
+    },
+    toggle(matchId) { if (!pending && ready && (state?.status === 'analyzing' || state?.status === 'review') && (state.status !== 'review' || (state.eligible_match_ids || state.matches.map(match => match.match_id)).includes(matchId))) { selectionStore.toggle(state, matchId); publish() } },
     dispose() { disposed = true; generation += 1; registration?.abort(); registration = null; unlisten?.(); unlisten = null },
-    getState: () => ({ run: state, pending, ready }),
+    getState: () => ({ run: state, pending, ready, recovery, recoveryError }),
   }
 }

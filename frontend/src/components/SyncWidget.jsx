@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { cancelSyncRun, commitLedgerSync, getSyncRun, isDesktopRuntime, listenForSyncEvents, startLedgerSync } from '../services/apiClient'
+import { cancelSyncRun, commitLedgerSync, getSyncRun, getSyncOutcomes, reconcileLedgerSync, retryLedgerSync, isDesktopRuntime, listenForSyncEvents, startLedgerSync } from '../services/apiClient'
 import { createSyncRunController } from '../services/syncRunController'
-import { canAbandonReview, canCommitReview, canStartRun, canToggleMatch, showsReview } from '../services/syncRunView'
+import { canAbandonReview, canCommitReview, canStartRun, canToggleMatch, managedOutcomes, retryableManagedItems, showsReview } from '../services/syncRunView'
 
 const empty = { status: 'idle', logs: [], matches: [], unmatched: [], errors: [] }
 const displayText = value => ['string', 'number', 'boolean'].includes(typeof value) ? String(value) : ''
@@ -13,7 +13,7 @@ const SyncWidget = () => {
   const { status = 'idle', logs = [], matches = [], unmatched = [], errors = [] } = run
 
   useEffect(() => {
-    const api = { getSyncRun, listenForSyncEvents, startLedgerSync, commitLedgerSync, cancelSyncRun }
+    const api = { getSyncRun, getSyncOutcomes, reconcileLedgerSync, retryLedgerSync, listenForSyncEvents, startLedgerSync, commitLedgerSync, cancelSyncRun }
     const controller = createSyncRunController({ api, onChange: setView })
     controllerRef.current = controller
     controller.connect()
@@ -25,6 +25,8 @@ const SyncWidget = () => {
   }, [logs, status])
 
   const selected = view.selectedIds || new Set()
+  const outcomes = view.recovery || managedOutcomes(run)
+  const safeOutcomes = retryableManagedItems(outcomes)
 
   const start = () => controllerRef.current?.start()
   const commit = () => {
@@ -46,6 +48,14 @@ const SyncWidget = () => {
     </div>
     {!view.ready && <div className="text-white/60 px-4" role="status">Connecting to the desktop sync service… <button onClick={() => controllerRef.current?.connect()} className="underline text-cyan-400">Reconnect</button></div>}
     {view.error && <div className="text-red-400 px-4" role="alert">Sync failed: {String(view.error.message || view.error)} <button onClick={() => controllerRef.current?.connect()} className="underline">Reconnect</button></div>}
+    <section className="bg-zinc-950 rounded-lg border border-white/10 p-5 space-y-3" aria-label="Managed import recovery">
+      <div className="flex items-center justify-between gap-4"><h3 className="text-lg font-black uppercase text-white/70">Import recovery</h3><div className="flex gap-2">
+        <button onClick={() => controllerRef.current?.refreshOutcomes()} disabled={!view.ready || view.pending} className="px-3 py-2 rounded border border-white/10 text-white/70 disabled:opacity-40">Refresh outcomes</button>
+        {safeOutcomes.length > 0 && <button onClick={() => controllerRef.current?.retryOutcomes()} disabled={!view.ready || view.pending || (run.run_id && !terminal && status !== 'idle')} className="px-3 py-2 rounded bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 disabled:opacity-40">{view.pending ? 'Retrying…' : `Retry ${safeOutcomes.length} safe items`}</button>}
+      </div></div>
+      {view.recoveryError && <div className="text-red-300" role="alert">Unable to refresh recovery outcomes: {displayText(view.recoveryError.message) || 'Unknown recovery error'}</div>}
+      {outcomes.length === 0 ? <div className="text-white/40 text-sm">No managed import outcomes recorded.</div> : <div className="space-y-2">{outcomes.map((item, index) => <div key={`${item.operation_id || item.item_id}-${index}`} className={`p-3 rounded border ${item.state === 'succeeded' ? 'border-green-500/20 bg-green-500/5 text-green-300' : item.state === 'uncertain' ? 'border-amber-500/30 bg-amber-500/5 text-amber-200' : 'border-red-500/20 bg-red-500/5 text-red-300'}`}><div className="font-medium">{displayText(item.filename) || 'Statement'} — {displayText(item.state)}</div><div className="text-xs opacity-70 mt-1">{displayText(item.message)}</div>{item.state === 'uncertain' && <div className="text-xs mt-1">Manual review required.</div>}</div>)}</div>}
+    </section>
     <div className="flex-1 bg-zinc-950 rounded-lg border border-white/10 shadow-2xl overflow-hidden flex flex-col">
       {(status === 'idle' || status === 'analyzing' || status === 'failed' || status === 'cancelled') && <div className="flex-1 flex flex-col font-mono text-sm">
         <div className="bg-zinc-900 px-4 py-2 border-b border-white/10 text-white/30 text-xs uppercase">Analyzer Terminal</div>
@@ -59,6 +69,7 @@ const SyncWidget = () => {
         {run.analysis_outcome && <div className={`${run.analysis_outcome === 'failed' ? 'text-red-400' : run.analysis_outcome === 'partial' ? 'text-amber-300' : 'text-cyan-300'} p-3 border border-white/10 rounded`}>Analysis {run.analysis_outcome}{run.analysis_outcome === 'partial' ? ` — ${matches.length} match(es), ${unmatched.length + errors.length} diagnostic(s). Review successful matches; unresolved items cannot be committed.` : ''}</div>}
         {status === 'failed' && <div className="bg-red-500/10 border border-red-500/30 text-red-400 p-4 rounded text-center font-bold uppercase">{run.analysis_outcome === 'failed' ? 'Analysis Failed' : 'Commit Failed'}</div>}
         {status === 'complete' && <div className="bg-green-500/10 border border-green-500/30 text-green-400 p-4 rounded text-center font-bold uppercase">Sync Completed Successfully</div>}
+
         {(status === 'review' || status === 'analyzing' || status === 'failed') && <div><h3 className="text-lg font-black uppercase text-accent mb-4 border-b border-white/10 pb-2">{status === 'analyzing' ? 'Matches so far' : status === 'failed' ? 'Retained matches' : 'Ready to Commit'} ({matches.length})</h3>
           {matches.length === 0 ? <div className="text-white/40 italic">No matches found.</div> : <div className="space-y-2">{matches.map((m) => <div key={m.match_id} className={`flex items-center justify-between p-4 rounded border ${selected.has(m.match_id) ? 'bg-zinc-900 border-accent/30' : 'bg-black border-white/5 opacity-50'}`}>
             <div className="flex items-center gap-4"><input type="checkbox" checked={selected.has(m.match_id)} onChange={() => toggle(m.match_id)} className="w-5 h-5 accent-accent" disabled={!canToggleMatch(run, view.ready, view.pending, m.match_id)}/><div><div className="font-bold text-white/90">{displayText(m.rule)} <span className="text-white/30 text-sm font-normal">({displayText(m.date)})</span></div><div className="text-xs text-white/50 font-mono mt-1">{displayText(m.filename)} -&gt; {displayText(m.new_name)}</div></div></div>

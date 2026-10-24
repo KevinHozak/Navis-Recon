@@ -151,7 +151,7 @@ Obligation medians and means use fixed 18-place decimal arithmetic. `median_is_e
 
 ## 🛡️ Operational Mandates (Vault Protocol)
 
-1. **Strict Chronology:** Statements must be archived using the format `[Institution] [YYYY-MM-DD].pdf`.
+1. **Strict Chronology:** Statements use the basename format `Institution YYYY-MM-DD.pdf` and are stored under the validated statement year.
 2. **Directory Structure:** No financial PDFs in the root. Everything resides inside `C:/Example/`:
    - `Statements/`: Archive of all income/expense reports.
    - `Policies/`: Insurance, Taxes, and long-term contracts.
@@ -161,4 +161,9 @@ Obligation medians and means use fixed 18-place decimal arithmetic. `median_is_e
 
 ### Harvester sync review outcome policy
 
-Analysis outcome is separate from lifecycle status. Exit code zero with matches and no item errors or unmatched results is success; exit zero with valid matches plus item errors or unmatched results is partial and permits review of successful matches only; exit zero with errors but no matches is failed. Exit zero with no matches and no item errors is a successful empty review. Nonzero exit, spawn/wait/read failure, malformed structured output, or a global error lacking item context is failed, even when useful matches were already emitted. Stderr is retained as diagnostic log text and does not alone make an analysis partial. Plain stdout lines remain logs. Backend match IDs are scoped to the run and derived from the canonical child item after removing child identity; duplicate identical items collapse. Commit accepts selected match IDs and resolves them to the backend retained original item before child stdin. Outcomes and diagnostics remain in the in-memory snapshot through commit. Selection is process-memory only; commits are not automatically retried after transport uncertainty. Durable per-file outcomes, cancellation and timeout handling remain S009/S010 work.
+Analysis outcome is separate from lifecycle status. Exit code zero with matches and no item errors or unmatched results is success; exit zero with valid matches plus item errors or unmatched results is partial and permits review of successful matches only; exit zero with errors but no matches is failed. Exit zero with no matches and no item errors is a successful empty review. Nonzero exit, spawn/wait/read failure, malformed structured output, or a global error lacking item context is failed, even when useful matches were already emitted. Stderr is retained as diagnostic log text and does not alone make an analysis partial. Plain stdout lines remain logs. Backend match IDs are scoped to the run and derived from the canonical child item after removing child identity; duplicate identical items collapse. During analysis, the coordinator privately binds each eligible match ID to a prepared native import plan containing source and ledger revisions. Commit accepts only selected backend IDs and executes the retained plans; the legacy external commit command is not launched. Per-operation receipts, backups, reconciliation, and safe retry survive process restarts. `get_sync_run`, `get_sync_outcomes`, `reconcile_ledger_sync`, and `retry_ledger_sync` expose durable results without exposing local paths. Cancellation and timeout handling remain S010 work.
+
+
+### Managed sync import (RECON-S009)
+
+The external finance processor is analysis-only. Its observed legacy --commit lacks durable item identity and idempotency, so production commit IPC routes through the native managed importer. See [managed-sync-import.md](managed-sync-import.md) for the supported subset, required `sync_inbox_path` and `sync_counter_account` settings, private journal location, recovery and retry protocol, IPC argument shapes, and platform limits. Encrypted transforms and ambiguous interrupted operations fail closed for manual review.

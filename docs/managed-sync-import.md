@@ -1,0 +1,44 @@
+# Managed sync import protocol (RECON-S009)
+
+## External analyzer boundary
+
+The observed legacy processor's `--analyze` output supplies candidate metadata. Its `--commit` can move or decrypt files, append logs and ledger text, and return generic process results. It does not supply durable per-item identities, source hash preconditions, idempotency, or recoverable outcomes. Navis-Recon does not invoke that commit path. No external processor code, credentials, private defaults, or household data are copied into this project.
+
+## Approval and commit
+
+At sync start, Rust resolves one managed configuration snapshot. When each analyzer match arrives, Rust privately prepares a plan keyed by the backend generated `match_id`. The plan captures the canonical inbox source path, its SHA-256 and byte length, canonical archive destination, validated date, generated balanced entry, exact ledger-before bytes and hash, configured currency, and counter account. It never accepts a child-provided plan or path during commit. A source mismatch, changed ledger revision, missing/invalid flags, unsupported amount/account/currency/description, duplicate source or destination, unsafe Windows filename, occupied archive target, or a path outside its configured root fails closed.
+
+Archive paths are `statement_archive_path/Statements <validated item date year>/<new_name>`. `new_name` is a safe basename; the existing `Institution YYYY-MM-DD.pdf` convention is supported without requiring a date prefix. Roots and source paths are canonicalized, reparse-point roots are rejected on Windows, and the final archive parent is checked again before create-new publication. Names reject traversal, separators, alternate data streams, reserved device names, controls, and Windows-trimmed dot/space aliases.
+
+## Durable operation protocol
+
+The operation identity is SHA-256 over the canonical ledger namespace and source content digest. It stays stable across runs and backend item IDs. The private `%LOCALAPPDATA%/Navis-Recon/sync-imports/<ledger namespace>/` store is outside Git checkouts. Version 2 receipts use strict schema and semantic checks; they bind the operation, source digest and size, date, destination, archive digest, exact generated entry, ledger-before digest and size, and synced whole-ledger backup. Temporary receipt files use `create_new`, flush to disk, then Windows `MoveFileExW` with replace-existing and write-through. A process-held exclusive journal handle serializes readers, reconciliation, retries, and commits; a leftover lock file alone does not retain a lock after process exit.
+
+Before a selected batch starts, Rust validates every approved ID and prepared source, checks duplicate sources and destinations, verifies every ledger-before image, and parses the combined candidate entries. Each item then holds the journal lock and an exclusive ledger handle plus a Windows range lock before archive effects. The ledger revision advances only by a previously verified append from this same batch. For each operation, Rust syncs the archive with create-new semantics and persists an `archived` receipt as ownership proof. It then appends only the validated balanced entry (or a comment marker for a zero amount), flushes and verifies exactly one complete owned block, and persists `succeeded`. Original ledger bytes are preserved, including a missing final newline. The reviewed source is retained on every outcome, so an already imported source is recognized by content identity on later analysis and cannot create a duplicate append. Archive files are never overwritten, even when their bytes match.
+
+The supported ledger parser deliberately rejects syntax outside its native subset. Writes fail closed outside Windows because the required exclusive file and range locking is not available there.
+
+## Restart reconciliation and IPC
+
+`ItemOutcome` keeps the established `item_id`, `filename`, `state`, `retry_safe`, and `message` fields; `operation_id` is an optional durable receipt ID. Store/configuration failures return an explicit `uncertain` outcome instead of an empty success.
+
+| Command | Arguments | Result / behavior |
+|---|---|---|
+| `get_sync_run` | none | Current `SyncRun`; reconnect hydration includes durable managed outcomes. |
+| `get_sync_outcomes` | none | `ItemOutcome[]`; verifies and reconciles durable receipts. |
+| `reconcile_ledger_sync` | none | Same `ItemOutcome[]`; promotes only exact verified effects and marks no-effect intents retry-safe. |
+| `commit_ledger_sync` | `{ runId: string, payload: string[] }` | Selects backend match IDs; native plans remain coordinator-owned. |
+| `retry_ledger_sync` | `{ operationIds: string[] }` | Retries only durable receipt IDs. It rechecks journal, source when needed, backup, archive, and locked ledger state. |
+
+After restart, an `intent` with the exact source, unchanged ledger, valid backup, and no archive effect becomes `failed` with `retry_safe: true`. If the archive was created but ownership proof was not durably recorded, reconciliation reports `uncertain` and does not infer ownership from matching bytes. An `archived` receipt with the exact owned archive and unchanged ledger is eligible for guarded completion; if its exact entry is already present once, reconciliation records success without appending again. Any missing/changed source, archive, backup, ledger-before state, duplicate or altered entry block, or corrupt/unknown receipt remains uncertain and is never overwritten automatically. A succeeded receipt is rechecked against the live archive and ledger on every read.
+
+### Verification boundary
+
+The native protocol is exercised only with synthetic temporary files, ledgers, and fake analyzer output. The app does not claim external processor idempotency. Source cleanup is intentionally manual; deleting a path after releasing its reviewed handle can remove a replacement file. The UI may offer retry only when `retry_safe` is true or when reconciliation identifies an owned archive that can be completed under the guarded retry command.
+
+
+## Recovery API and supported subset
+
+The desktop IPC commands are `get_sync_outcomes` and `reconcile_ledger_sync` (both return the complete `ItemOutcome[]` list), plus `retry_ledger_sync({ operationIds: string[] })`, which returns the immediate `SyncRun` snapshot and then publishes normal full-snapshot sync events while work completes. Recovery outcomes contain `item_id`, `filename`, `state` (`succeeded`, `failed`, or `uncertain`), `retry_safe`, `message`, and nullable `operation_id`. Retry accepts only durable 64-character hexadecimal operation IDs that reconciliation marked `retry_safe`; uncertain items require manual review. No HTTP financial-data fallback is supported.
+
+Managed archive destinations follow the existing `Statements YYYY/<new_name>` layout under the configured archive root. Source filenames are preserved and need only pass safe filename validation; there is no institution-prefix requirement. The supported managed import subset remains limited to reviewed statements with a valid date, category, amount, currency, and supported cleared/encrypted flags. Recovery is journaled and reconciled against exact ledger and archive evidence; the implementation does not claim power-loss atomicity.

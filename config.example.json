@@ -11,5 +11,7 @@
   "inventory_path": "C:/Example/inventory.json",
   "statements_path": "C:/Example/Statements",
   "statement_archive_path": "C:/Example/Statements",
+  "sync_inbox_path": "C:/Example/Statements/Inbox",
+  "sync_counter_account": "Assets:Bank:Checking",
   "harvester_script": "C:/Example/finance_processor.py"
 }
