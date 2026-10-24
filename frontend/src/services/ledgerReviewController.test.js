@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createLedgerReviewController, resolveApprovalCompletion, transactionKey } from './ledgerReviewController.js'
+import { createLedgerReviewController, resolveApprovalCompletion, resolveUndoCompletion, transactionKey, validateApprovalHistory } from './ledgerReviewController.js'
 
 const row = (line_num = 0) => ({ line_num, transaction_id: 'b'.repeat(64), ledger_revision: 'a'.repeat(64), category: 'Expenses:Food' })
 const deferred = () => {
@@ -59,7 +59,7 @@ test('approval conflict completing after refresh is stale and cannot replace cur
   assert.equal(refreshed.rows[0].line_num, 8)
 })
 
-test('successful write invalidates pre-write list and consumes its revision until a new list arrives', async () => {
+test('successful write invalidates pre-write list authority until a new list arrives', async () => {
   const listCall = deferred(); let calls = 0
   const firstRow = row(0); const nextRow = { ...row(1), ledger_revision: 'c'.repeat(64) }
   const controller = createLedgerReviewController({ list: () => ++calls === 1 ? Promise.resolve([firstRow]) : listCall.promise, approve: async () => {} })
@@ -68,7 +68,7 @@ test('successful write invalidates pre-write list and consumes its revision unti
   assert.deepEqual(await controller.approve(firstRow, 'Expenses:Food'), { approved: true, refreshRequired: true })
   listCall.resolve([nextRow])
   assert.equal((await olderList).stale, true)
-  assert.match((await controller.approve(firstRow, 'Expenses:Food')).error, /already used/)
+  assert.match((await controller.approve(firstRow, 'Expenses:Food')).error, /Refresh pending/)
   await controller.refresh()
   assert.equal((await controller.approve(nextRow, 'Expenses:Food')).approved, true)
 })
@@ -80,6 +80,7 @@ test('successful write invalidates a manual refresh started while mutation is pe
     list: () => ++calls === 1 ? Promise.resolve([original]) : calls === 2 ? oldList.promise : Promise.resolve([fresh]),
     approve: () => mutation.promise,
   })
+  controller.activate()
   await controller.refresh()
   const write = controller.approve(original, 'Expenses:Food')
   const manualRefresh = controller.refresh()
@@ -138,4 +139,81 @@ test('approval completing after dispose is stale', async () => {
   const outcome = controller.approve(row(), 'Expenses:Food')
   controller.dispose(); pending.reject(new Error('late failure'))
   assert.equal((await outcome).stale, true)
+})
+
+const approvalRecord = { id: 'approval-123', operation_type: 'approve', timestamp_unix_ms: 100, before_hash: 'c'.repeat(64), after_hash: 'd'.repeat(64), old_category: 'Expenses:Uncategorized', new_category: 'Expenses:Food', undo_of: null, undone: false }
+
+test('approve undo reload permits original revision reapproval and rejects a stale pre-undo list', async () => {
+  const original = row(); const stale = deferred(); let listCount = 0; const calls = []
+  const controller = createLedgerReviewController({
+    list: async () => { listCount += 1; return listCount === 2 ? stale.promise : [original] }, approve: async () => calls.push('approve'),
+    history: async () => [approvalRecord], undo: async () => calls.push('undo'),
+  })
+  await controller.refresh()
+  const staleList = controller.refresh()
+  assert.equal((await controller.approve(original, 'Expenses:Food')).approved, true)
+  stale.resolve([row(9)])
+  assert.equal((await staleList).stale, true)
+  const record = (await controller.refreshHistory()).rows[0]
+  assert.equal((await controller.undo(record)).saved, true)
+  assert.deepEqual((await controller.refresh()).rows, [original])
+  assert.equal((await controller.approve(original, 'Expenses:Food')).approved, true)
+  assert.deepEqual(calls, ['approve', 'undo', 'approve'])
+})
+
+test('undo has duplicate guard; failed mutation remains failed across successful automatic history refresh', async () => {
+  const gate = deferred(); let undoCalls = 0
+  const controller = createLedgerReviewController({ list: async () => [row()], approve: async () => {}, history: async () => [approvalRecord], undo: () => { undoCalls += 1; return gate.promise } })
+  controller.activate()
+  const first = controller.undo(approvalRecord)
+  assert.deepEqual(await controller.undo(approvalRecord), { skipped: true })
+  assert.equal(undoCalls, 1)
+  gate.reject(new Error('ledger conflict'))
+  const failure = await first
+  assert.equal(failure.saved, false); assert.equal(failure.error, 'ledger conflict')
+  assert.equal((await controller.refreshHistory()).rows.length, 1)
+  assert.equal(failure.error, 'ledger conflict')
+})
+
+test('undo success invalidates pending and history generations; late completion after dispose is stale', async () => {
+  const oldPending = deferred(); const undoGate = deferred(); let lists = 0
+  const controller = createLedgerReviewController({ list: () => ++lists === 1 ? oldPending.promise : Promise.resolve([row(2)]), approve: async () => {}, history: async () => [approvalRecord], undo: () => undoGate.promise })
+  controller.activate()
+  const pendingRequest = controller.refresh()
+  const undoRequest = controller.undo(approvalRecord)
+  undoGate.resolve()
+  assert.equal((await undoRequest).refreshRequired, true)
+  oldPending.resolve([row()])
+  assert.equal((await pendingRequest).stale, true)
+  assert.deepEqual((await controller.refresh()).rows, [row(2)])
+  const late = deferred(); const other = createLedgerReviewController({ list: async () => [row()], approve: async () => {}, history: async () => [approvalRecord], undo: () => late.promise })
+  other.activate(); const outcome = other.undo(approvalRecord); other.dispose(); late.reject(new Error('late rejection'))
+  assert.deepEqual(await outcome, { stale: true })
+})
+
+test('history validates display fields and malformed payload is an explicit error', () => {
+  assert.equal(validateApprovalHistory([approvalRecord]).length, 1)
+  assert.throws(() => validateApprovalHistory([{ ...approvalRecord, before_hash: 'bad' }]), /malformed records/)
+})
+
+test('Undo completion used by the widget clears ownership before suppressing a stale rejection', async () => {
+  const gate = deferred(); const controller = createLedgerReviewController({ list: async () => [row()], approve: async () => {}, history: async () => [approvalRecord], undo: () => gate.promise })
+  controller.activate()
+  const request = controller.undo(approvalRecord)
+  await controller.refresh() // manual refresh invalidates the rejected Undo result
+  gate.reject(new Error('original request conflict'))
+  const result = await request
+  const completion = resolveUndoCompletion(result, true)
+  assert.deepEqual(completion, { clearUndoing: true, stale: true, error: null, saved: false, refreshRequired: false })
+})
+
+test('history wire validation rejects coerced hashes, duplicate IDs, bad timestamps, and malformed operation parents', () => {
+  const cases = [
+    { ...approvalRecord, before_hash: Object.assign([], { toString: () => 'c'.repeat(64) }) },
+    { ...approvalRecord, timestamp_unix_ms: 8640000000000001 },
+    { ...approvalRecord, undo_of: 'parent' },
+    { ...approvalRecord, operation_type: 'undo', undo_of: null },
+  ]
+  for (const value of cases) assert.throws(() => validateApprovalHistory([value]), /malformed records/)
+  assert.throws(() => validateApprovalHistory([approvalRecord, { ...approvalRecord }]), /malformed records/)
 })

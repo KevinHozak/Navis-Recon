@@ -44,6 +44,10 @@ credentials*.json
 *.sqlite3
 *.db
 *.db-*
+*.recon-recovery-*
+approval-history/
+*.recon-intent.json
+*.recon-journal.json
 checklist.json
 subscriptions.json
 inventory.json

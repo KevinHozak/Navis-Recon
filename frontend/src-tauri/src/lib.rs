@@ -5,6 +5,7 @@ mod ledger_review;
 mod money;
 mod obligations;
 mod records;
+mod review_audit;
 mod statements;
 mod sync;
 
@@ -16,6 +17,8 @@ pub fn run() {
             ledger_review::get_pending_ledger,
             ledger_review::get_ledger_categories,
             ledger_review::approve_ledger_transaction,
+            ledger_review::get_ledger_approval_history,
+            ledger_review::undo_ledger_approval,
             ledger_parser::get_ledger_summary,
             ledger_parser::get_ledger_source_state,
             ledger_parser::get_ledger_history,

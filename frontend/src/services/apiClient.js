@@ -72,13 +72,43 @@ export function getLedgerCategories() {
 }
 
 export function approveLedgerTransaction(lineNum, transactionId, ledgerRevision, category) {
-  return request('/api/ledger/approve', {
+  return auditedMutation({
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ line_num: lineNum, transaction_id: transactionId, ledger_revision: ledgerRevision, category }),
     ipcCommand: 'approve_ledger_transaction',
     ipcArgs: { lineNum, transactionId, ledgerRevision, category },
   })
+}
+
+export function getLedgerApprovalHistory() {
+  return desktopRequest('get_ledger_approval_history', {})
+}
+
+export function undoLedgerApproval(recordId) {
+  return auditedMutation({ ipcCommand: 'undo_ledger_approval', ipcArgs: { recordId } })
+}
+
+const mutationListeners = new Set()
+export function subscribeLedgerMutation(listener) { mutationListeners.add(listener); return () => mutationListeners.delete(listener) }
+export function invalidateLedgerViews() { for (const listener of mutationListeners) { try { listener() } catch (error) { console.error('Ledger mutation subscriber failed:', error) } } }
+
+function desktopRequest(command, args) {
+  if (!isDesktopRuntime()) return Promise.reject(new Error('Audited ledger review requires the Tauri desktop shell.'))
+  return invoke(command, args)
+}
+
+async function auditedMutation(options) {
+  try {
+    const { ipcCommand, ipcArgs } = options
+    const result = await desktopRequest(ipcCommand, ipcArgs)
+    invalidateLedgerViews()
+    return result
+  } catch (error) {
+    // A rejected IPC call may have committed before its response was lost.
+    invalidateLedgerViews()
+    throw error
+  }
 }
 
 export function getLedgerSummary() {

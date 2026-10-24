@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { approveLedgerTransaction, getLedgerSourceState, getLedgerSummary, getPendingLedger } from './apiClient.js'
+import { approveLedgerTransaction, getLedgerApprovalHistory, undoLedgerApproval, subscribeLedgerMutation, getLedgerSourceState, getLedgerSummary, getPendingLedger } from './apiClient.js'
 
 test('ledger API client preserves Tauri arguments and exact summary provenance at IPC boundary', async () => {
   const hadWindow = Object.hasOwn(globalThis, 'window')
@@ -69,4 +69,47 @@ test('pending ledger IPC preserves per-row permission snapshot', async () => {
     if (hadWindow) globalThis.window = originalWindow
     else delete globalThis.window
   }
+})
+
+test('approval and undo invalidate automatically at the IPC boundary without exposing snapshots', async () => {
+  const hadWindow = Object.hasOwn(globalThis, 'window'); const originalWindow = globalThis.window; const calls = []; let invalidations = 0
+  const unsubscribe = subscribeLedgerMutation(() => { invalidations += 1 })
+  try {
+    globalThis.window = { __TAURI_INTERNALS__: { invoke: async (command, args) => { calls.push({ command, args }); return [] } } }
+    await getLedgerApprovalHistory(); await undoLedgerApproval('approval-123')
+    assert.deepEqual(calls, [
+      { command: 'get_ledger_approval_history', args: {} },
+      { command: 'undo_ledger_approval', args: { recordId: 'approval-123' } },
+    ])
+    assert.equal(invalidations, 1)
+    assert.deepEqual(calls[1].args, { recordId: 'approval-123' })
+  } finally { unsubscribe(); if (hadWindow) globalThis.window = originalWindow; else delete globalThis.window }
+})
+
+test('approval auto-invalidates, isolates throwing listeners, and uncertain rejection still invalidates', async () => {
+  const hadWindow = Object.hasOwn(globalThis, 'window'); const originalWindow = globalThis.window; let updates = 0; let shouldFail = false
+  const removeBad = subscribeLedgerMutation(() => { throw new Error('subscriber') })
+  const removeGood = subscribeLedgerMutation(() => { updates += 1 })
+  try {
+    globalThis.window = { __TAURI_INTERNALS__: { invoke: async () => { if (shouldFail) throw new Error('uncertain'); return null } } }
+    assert.equal(await approveLedgerTransaction(2, 'a'.repeat(64), 'b'.repeat(64), 'Expenses:Food'), null)
+    assert.equal(updates, 1)
+    shouldFail = true
+    await assert.rejects(undoLedgerApproval('record-1'), /uncertain/)
+    assert.equal(updates, 2)
+    removeGood();
+    shouldFail = false
+    await approveLedgerTransaction(2, 'a'.repeat(64), 'b'.repeat(64), 'Expenses:Food')
+    assert.equal(updates, 2)
+  } finally { removeBad(); removeGood(); if (hadWindow) globalThis.window = originalWindow; else delete globalThis.window }
+})
+
+test('audited history and mutations reject outside desktop without HTTP fallback', async () => {
+  const hadWindow = Object.hasOwn(globalThis, 'window'); const originalWindow = globalThis.window
+  try {
+    delete globalThis.window
+    await assert.rejects(getLedgerApprovalHistory(), /Tauri desktop shell/)
+    await assert.rejects(undoLedgerApproval('record-1'), /Tauri desktop shell/)
+    await assert.rejects(approveLedgerTransaction(1, 'a'.repeat(64), 'b'.repeat(64), 'Expenses:Food'), /Tauri desktop shell/)
+  } finally { if (hadWindow) globalThis.window = originalWindow; else delete globalThis.window }
 })

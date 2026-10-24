@@ -8,13 +8,15 @@ import SubscriptionsWidget from './components/SubscriptionsWidget'
 import SyncWidget from './components/SyncWidget'
 import WealthDashboardWidget from './components/WealthDashboardWidget'
 import RecordsWidget from './components/RecordsWidget'
-import { ping, request, getRecurringObligations, getRecordsRadar } from './services/apiClient'
+import { ping, getPendingLedger, getRecurringObligations, getRecordsRadar, subscribeLedgerMutation } from './services/apiClient'
+import { createLatestRequestLoader } from './services/latestRequestLoader'
 import './index.css'
 
 function App() {
   const [currentView, setCurrentView] = useState('overview');
-  const [pendingCount, setPendingCount] = useState(0);
-  const [alertObligationsCount, setAlertObligationsCount] = useState(0);
+  const [pendingCount, setPendingCount] = useState(null);
+  const [ledgerGeneration, setLedgerGeneration] = useState(0);
+  const [alertObligationsCount, setAlertObligationsCount] = useState(null);
   const [recordsActionCount, setRecordsActionCount] = useState(0);
   const [desktopStatus, setDesktopStatus] = useState('checking');
   const [statementFilter, setStatementFilter] = useState(null);
@@ -30,6 +32,9 @@ function App() {
 
   useEffect(() => {
     let isMounted = true;
+    const pendingLoader = createLatestRequestLoader({ load: getPendingLedger, update: (value) => { if (isMounted) setPendingCount(value) }, map: (rows) => Array.isArray(rows) ? rows.length : null });
+    const obligationLoader = createLatestRequestLoader({ load: getRecurringObligations, update: (value) => { if (isMounted) setAlertObligationsCount(value) }, map: (rows) => Array.isArray(rows) ? rows.reduce((acc, curr) => acc + (curr.alerts ? curr.alerts.length : 0), 0) : null });
+    const recordsLoader = createLatestRequestLoader({ load: getRecordsRadar, update: (value) => { if (isMounted) setRecordsActionCount(value) }, map: (report) => report?.summary ? (report.summary.actionRequired || 0) : null });
 
     ping()
       .then(() => {
@@ -39,46 +44,14 @@ function App() {
         if (isMounted) setDesktopStatus('offline');
       });
 
-    const updatePendingCount = async () => {
-      try {
-        const data = await request('/api/ledger/pending');
-        if (isMounted) {
-          setPendingCount(data.length);
-        }
-      } catch (e) {
-        console.error(e);
-      }
-    };
-
-    const updateObligationAlerts = async () => {
-      try {
-        const obligations = await getRecurringObligations();
-        if (isMounted && Array.isArray(obligations)) {
-          const totalAlerts = obligations.reduce(
-            (acc, curr) => acc + (curr.alerts ? curr.alerts.length : 0),
-            0
-          );
-          setAlertObligationsCount(totalAlerts);
-        }
-      } catch (e) {
-        console.warn('Failed to fetch recurring obligations alert count:', e);
-      }
-    };
-
-    const updateRecordsRadarCount = async () => {
-      try {
-        const radarReport = await getRecordsRadar();
-        if (isMounted && radarReport?.summary) {
-          setRecordsActionCount(radarReport.summary.actionRequired || 0);
-        }
-      } catch (e) {
-        console.warn('Failed to fetch records radar action count:', e);
-      }
-    };
+    const updatePendingCount = () => pendingLoader.refresh();
+    const updateObligationAlerts = () => obligationLoader.refresh();
+    const updateRecordsRadarCount = () => recordsLoader.refresh();
 
     updatePendingCount();
     updateObligationAlerts();
     updateRecordsRadarCount();
+    const unsubscribeLedgerMutation = subscribeLedgerMutation(() => { setLedgerGeneration((value) => value + 1); updatePendingCount(); updateObligationAlerts(); updateRecordsRadarCount(); });
     // Refresh count every 10 seconds to keep sidebar accurate
     const interval = setInterval(() => {
       updatePendingCount();
@@ -87,6 +60,10 @@ function App() {
     }, 10000);
     return () => {
       isMounted = false;
+      pendingLoader.dispose();
+      obligationLoader.dispose();
+      recordsLoader.dispose();
+      unsubscribeLedgerMutation();
       clearInterval(interval);
     };
   }, []);
@@ -135,7 +112,7 @@ function App() {
               <div className="flex items-center gap-3">
                 <span className={currentView === 'records' ? 'text-accent' : 'opacity-70'}>📁</span> Records
               </div>
-              {recordsActionCount > 0 && (
+              {recordsActionCount === null ? <span className="text-[10px] text-white/40">Unavailable</span> : recordsActionCount > 0 && (
                 <span className="bg-red-500/20 text-red-400 border border-red-500/50 px-2 py-0.5 rounded text-[10px] animate-pulse">
                   {recordsActionCount}
                 </span>
@@ -150,7 +127,7 @@ function App() {
               <div className="flex items-center gap-3">
                 <span className={currentView === 'subscriptions' ? 'text-accent' : 'opacity-70'}>💳</span> Subscriptions
               </div>
-              {alertObligationsCount > 0 && (
+              {alertObligationsCount === null ? <span className="text-[10px] text-white/40">Unavailable</span> : alertObligationsCount > 0 && (
                 <span className="bg-amber-500/20 text-amber-300 border border-amber-500/50 px-2 py-0.5 rounded text-[10px]">
                   {alertObligationsCount}
                 </span>
@@ -165,7 +142,7 @@ function App() {
               <div className="flex items-center gap-3">
                 <span className={currentView === 'reviews' ? 'text-accent' : 'opacity-70'}>📝</span> Reviews
               </div>
-              {pendingCount > 0 && (
+              {pendingCount === null ? <span className="text-[10px] text-white/40">Unavailable</span> : pendingCount > 0 && (
                 <span className="bg-red-500/20 text-red-400 border border-red-500/50 px-2 py-0.5 rounded text-[10px] animate-pulse">
                   {pendingCount}
                 </span>
@@ -186,11 +163,11 @@ function App() {
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col h-screen overflow-y-auto custom-scrollbar">
         <div className="p-12 mx-auto w-full xl:max-w-7xl 2xl:max-w-full">
-          {currentView === 'overview' && <OverviewWidget onNavigateToReviews={() => setCurrentView('reviews')} />}
+          {currentView === 'overview' && <OverviewWidget key={ledgerGeneration} onNavigateToReviews={() => setCurrentView('reviews')} />}
           
           {currentView === 'wealth' && (
             <div className="h-full">
-              <WealthDashboardWidget />
+              <WealthDashboardWidget key={ledgerGeneration} />
             </div>
           )}
 
@@ -208,7 +185,7 @@ function App() {
 
           {currentView === 'subscriptions' && (
             <div className="h-full">
-              <SubscriptionsWidget />
+              <SubscriptionsWidget key={ledgerGeneration} />
             </div>
           )}
 
@@ -235,10 +212,10 @@ function App() {
             </div>
           )}
 
-          {currentView === 'cat_bank_accounts' && <CategoryDetailWidget categoryKey="bank_accounts" title="Bank Accounts" icon="🏦" />}
-          {currentView === 'cat_retirement' && <CategoryDetailWidget categoryKey="retirement" title="Retirement" icon="📈" />}
-          {currentView === 'cat_investments' && <CategoryDetailWidget categoryKey="investments" title="Investments" icon="💹" />}
-          {currentView === 'cat_credit_cards' && <CategoryDetailWidget categoryKey="credit_cards" title="Credit Cards" icon="💳" isLiability={true} />}
+          {currentView === 'cat_bank_accounts' && <CategoryDetailWidget key={ledgerGeneration} categoryKey="bank_accounts" title="Bank Accounts" icon="🏦" />}
+          {currentView === 'cat_retirement' && <CategoryDetailWidget key={ledgerGeneration} categoryKey="retirement" title="Retirement" icon="📈" />}
+          {currentView === 'cat_investments' && <CategoryDetailWidget key={ledgerGeneration} categoryKey="investments" title="Investments" icon="💹" />}
+          {currentView === 'cat_credit_cards' && <CategoryDetailWidget key={ledgerGeneration} categoryKey="credit_cards" title="Credit Cards" icon="💳" isLiability={true} />}
 
         </div>
       </div>

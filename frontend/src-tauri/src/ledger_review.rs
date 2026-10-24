@@ -1,10 +1,12 @@
 use crate::money::Money;
+use crate::review_audit::{self, Intent};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
 
@@ -577,6 +579,247 @@ pub fn get_ledger_categories() -> Result<Vec<String>, String> {
 static APPROVAL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[tauri::command]
+pub fn get_ledger_approval_history() -> Result<Vec<review_audit::DisplayRecord>, String> {
+    let path = crate::config::get("ledger_path");
+    let (ns, dir) = review_audit::namespace(path)?;
+    get_history_with_store(path, &dir, &ns)
+}
+
+fn get_history_with_store(
+    path: &str,
+    dir: &Path,
+    ns: &str,
+) -> Result<Vec<review_audit::DisplayRecord>, String> {
+    let _guard = APPROVAL_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "ledger approval lock is unavailable".to_string())?;
+    let mut file = exclusive_ledger(path)?;
+    #[cfg(windows)]
+    let _range = WindowsRangeLock::acquire(&file)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    review_audit::reconcile(dir, ns, &sha256_hex(&bytes))?;
+    let records = review_audit::read_records(dir, ns)?;
+    #[cfg(windows)]
+    drop(_range);
+    drop(file);
+    Ok(review_audit::display(&records))
+}
+
+fn exclusive_ledger(path: &str) -> Result<File, String> {
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err("ledger review is supported only on Windows desktop".into())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let file=OpenOptions::new().read(true).write(true).share_mode(0).open(path).map_err(|e|format!("cannot acquire exclusive ledger handle: {e}; close other programs using the ledger"))?;
+        Ok(file)
+    }
+}
+
+#[tauri::command]
+pub fn undo_ledger_approval(record_id: String) -> Result<(), String> {
+    let path = crate::config::get("ledger_path");
+    let (ns, dir) = review_audit::namespace(path)?;
+    let _guard = APPROVAL_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "ledger approval lock is unavailable".to_string())?;
+    undo_ledger_approval_with_store(path, &record_id, &dir, &ns)
+}
+
+fn undo_ledger_approval_with_store(
+    path: &str,
+    id: &str,
+    dir: &Path,
+    ns: &str,
+) -> Result<(), String> {
+    undo_ledger_approval_with_fault(path, id, dir, ns, review_audit::FaultPlan::NONE)
+}
+
+fn undo_ledger_approval_with_fault(
+    path: &str,
+    id: &str,
+    dir: &Path,
+    ns: &str,
+    faults: review_audit::FaultPlan,
+) -> Result<(), String> {
+    #[cfg(not(windows))]
+    {
+        let _ = (path, id, dir, ns);
+        return Err("ledger review is supported only on Windows desktop".into());
+    }
+    #[cfg(windows)]
+    {
+        let mut file = exclusive_ledger(path)?;
+        let _range_lock = WindowsRangeLock::acquire(&file)?;
+        let mut original = Vec::new();
+        file.read_to_end(&mut original).map_err(|e| e.to_string())?;
+        review_audit::reconcile(dir, ns, &sha256_hex(&original))?;
+        let records = review_audit::read_records(dir, ns)?;
+        let (record, _) = records
+            .iter()
+            .find(|(r, _)| r.operation_id == id && r.operation_type == "approve")
+            .ok_or("approval history record was not found")?;
+        if records
+            .iter()
+            .any(|(r, _)| r.undo_of.as_deref() == Some(id))
+        {
+            return Err("this approval was already undone".into());
+        }
+        if !valid_approval_transition(record) {
+            return Err(
+                "approval history transition is invalid; manual recovery review required".into(),
+            );
+        }
+        let text = std::str::from_utf8(&original).map_err(|e| e.to_string())?;
+        let mut lines: Vec<String> = text.split_inclusive('\n').map(str::to_string).collect();
+        let candidates: Vec<usize> = (0..lines.len())
+            .filter(|&i| {
+                parse_transaction_header(&lines[i], i + 1)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|h| h.flag == '*')
+            })
+            .collect();
+        let matches: Vec<(usize, usize)> = candidates
+            .into_iter()
+            .filter_map(|start| {
+                let refs: Vec<_> = lines.iter().map(String::as_str).collect();
+                let end = transaction_block_end(&refs, start);
+                (lines[start..end].concat() == record.transaction_after).then_some((start, end))
+            })
+            .collect();
+        if matches.len() != 1 {
+            return Err("undo conflict: recorded transaction is missing, duplicated, or edited; refresh and review manually".into());
+        }
+        let (start, end) = matches[0];
+        let before = lines[start..end].concat();
+        let restored = record.transaction_before.clone();
+        lines.splice(
+            start..end,
+            restored.split_inclusive('\n').map(str::to_string),
+        );
+        let updated = lines.concat().into_bytes();
+        let intent = Intent {
+            schema_version: 1,
+            operation_id: format!(
+                "{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ),
+            operation_type: "undo".into(),
+            ledger_namespace: ns.into(),
+            source_revision_before: sha256_hex(&original),
+            source_revision_after: sha256_hex(&updated),
+            transaction_before_hash: sha256_hex(before.as_bytes()),
+            transaction_after_hash: sha256_hex(restored.as_bytes()),
+            transaction_before: before,
+            transaction_after: restored,
+            old_category: record.new_category.clone(),
+            new_category: record.old_category.clone(),
+            created_at_unix_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            undo_of: Some(id.into()),
+        };
+        audited_write(&mut file, path, &updated, &original, dir, &intent, faults)
+    }
+}
+
+fn valid_approval_transition(r: &review_audit::Record) -> bool {
+    if r.operation_type != "approve"
+        || r.transaction_before_hash != sha256_hex(r.transaction_before.as_bytes())
+        || r.transaction_after_hash != sha256_hex(r.transaction_after.as_bytes())
+    {
+        return false;
+    }
+    let a: Vec<_> = r.transaction_before.split_inclusive('\n').collect();
+    let b: Vec<_> = r.transaction_after.split_inclusive('\n').collect();
+    if a.len() != b.len() || a.is_empty() {
+        return false;
+    }
+    let Some(h) = parse_transaction_header(a[0], 1).ok().flatten() else {
+        return false;
+    };
+    if a.iter().skip(1).enumerate().any(|(index, line)| {
+        parse_transaction_header(line, index + 2)
+            .ok()
+            .flatten()
+            .is_some()
+    }) {
+        return false;
+    }
+    if h.flag != '!' {
+        return false;
+    }
+    let mut expected: Vec<String> = a.iter().map(|s| s.to_string()).collect();
+    expected[0].replace_range(h.flag_offset..h.flag_offset + 1, "*");
+    let refs: Vec<_> = a.iter().copied().collect();
+    let end = transaction_block_end(&refs, 0);
+    let Ok(loc) = locate_category_posting(&refs, 0, end) else {
+        return false;
+    };
+    if loc.account != r.old_category {
+        return false;
+    }
+    expected[loc.line_index].replace_range(loc.start..loc.finish, &r.new_category);
+    expected.concat() == r.transaction_after
+}
+
+pub(crate) fn valid_audit_transition(i: &Intent) -> bool {
+    let (before, after, old, new) = if i.operation_type == "approve" {
+        (
+            &i.transaction_before,
+            &i.transaction_after,
+            &i.old_category,
+            &i.new_category,
+        )
+    } else if i.operation_type == "undo" {
+        (
+            &i.transaction_after,
+            &i.transaction_before,
+            &i.new_category,
+            &i.old_category,
+        )
+    } else {
+        return false;
+    };
+    let r = review_audit::Record {
+        schema_version: i.schema_version,
+        operation_id: i.operation_id.clone(),
+        operation_type: "approve".into(),
+        ledger_namespace: i.ledger_namespace.clone(),
+        source_revision_before: i.source_revision_before.clone(),
+        source_revision_after: i.source_revision_after.clone(),
+        transaction_before: before.clone(),
+        transaction_after: after.clone(),
+        transaction_before_hash: sha256_hex(before.as_bytes()),
+        transaction_after_hash: sha256_hex(after.as_bytes()),
+        old_category: old.clone(),
+        new_category: new.clone(),
+        created_at_unix_ms: i.created_at_unix_ms,
+        committed_at_unix_ms: i.created_at_unix_ms,
+        undo_of: None,
+    };
+    valid_account_token(old) && valid_account_token(new) && valid_approval_transition(&r)
+}
+
+fn valid_account_token(s: &str) -> bool {
+    crate::ledger_parser::account_ok(s)
+        && !s.chars().any(|c| matches!(c, '\r' | '\n' | '\0'))
+        && matches!(s.split(':').next(), Some("Expenses" | "Income"))
+}
+
+#[tauri::command]
 pub fn approve_ledger_transaction(
     line_num: usize,
     transaction_id: String,
@@ -598,6 +841,52 @@ fn approve_ledger_transaction_at(
     transaction_id: &str,
     ledger_revision: &str,
     category: &str,
+) -> Result<(), String> {
+    #[cfg(test)]
+    let (namespace, audit_dir) = review_audit::test_store(path);
+    #[cfg(not(test))]
+    let (namespace, audit_dir) = review_audit::namespace(path)?;
+    approve_ledger_transaction_with_store(
+        path,
+        line_num,
+        transaction_id,
+        ledger_revision,
+        category,
+        &audit_dir,
+        &namespace,
+    )
+}
+
+fn approve_ledger_transaction_with_store(
+    path: &str,
+    line_num: usize,
+    transaction_id: &str,
+    ledger_revision: &str,
+    category: &str,
+    audit_dir: &Path,
+    namespace: &str,
+) -> Result<(), String> {
+    approve_ledger_transaction_with_fault(
+        path,
+        line_num,
+        transaction_id,
+        ledger_revision,
+        category,
+        audit_dir,
+        namespace,
+        review_audit::FaultPlan::NONE,
+    )
+}
+
+fn approve_ledger_transaction_with_fault(
+    path: &str,
+    line_num: usize,
+    transaction_id: &str,
+    ledger_revision: &str,
+    category: &str,
+    audit_dir: &Path,
+    namespace: &str,
+    faults: review_audit::FaultPlan,
 ) -> Result<(), String> {
     let _guard = APPROVAL_LOCK
         .get_or_init(|| Mutex::new(()))
@@ -626,6 +915,7 @@ fn approve_ledger_transaction_at(
         let mut original = Vec::new();
         file.read_to_end(&mut original)
             .map_err(|error| format!("failed to read ledger: {error}"))?;
+        review_audit::reconcile(audit_dir, namespace, &sha256_hex(&original))?;
         if sha256_hex(&original) != ledger_revision {
             return Err(
                 "ledger changed since these rows were listed; refresh pending transactions".into(),
@@ -650,6 +940,7 @@ fn approve_ledger_transaction_at(
         if sha256_hex(lines[line_num..end].concat().as_bytes()) != transaction_id {
             return Err("transaction content changed; refresh pending transactions".into());
         }
+        let before_tx = lines[line_num..end].concat();
         let located = locate_category_posting(&line_refs, line_num, end)?;
         if !crate::ledger_parser::account_ok(category)
             || !matches!(category.split(':').next(), Some("Expenses" | "Income"))
@@ -672,10 +963,40 @@ fn approve_ledger_transaction_at(
         let target = &mut lines[located.line_index];
         target.replace_range(located.start..located.finish, category);
         let updated = lines.concat().into_bytes();
-        if let Err(write_error) = write_through_handle(&mut file, path, &updated, &original) {
-            return Err(format!("ledger write failed: {write_error}"));
-        }
-        Ok(())
+        let after_text = String::from_utf8(updated.clone()).map_err(|e| e.to_string())?;
+        let after_lines: Vec<_> = after_text.split_inclusive('\n').collect();
+        let after_end = transaction_block_end(&after_lines, line_num);
+        let after_tx = after_lines[line_num..after_end].concat();
+        let operation_id = format!(
+            "{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let intent = Intent {
+            schema_version: 1,
+            operation_id,
+            operation_type: "approve".into(),
+            ledger_namespace: namespace.into(),
+            source_revision_before: sha256_hex(&original),
+            source_revision_after: sha256_hex(&updated),
+            transaction_before_hash: sha256_hex(before_tx.as_bytes()),
+            transaction_after_hash: sha256_hex(after_tx.as_bytes()),
+            transaction_before: before_tx,
+            transaction_after: after_tx,
+            old_category: located.account,
+            new_category: category.into(),
+            created_at_unix_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            undo_of: None,
+        };
+        audited_write(
+            &mut file, path, &updated, &original, audit_dir, &intent, faults,
+        )
     }
 }
 
@@ -724,15 +1045,6 @@ impl Drop for WindowsRangeLock {
     }
 }
 
-fn write_through_handle(
-    file: &mut File,
-    path: &str,
-    updated: &[u8],
-    original: &[u8],
-) -> Result<(), String> {
-    write_through_handle_injected(file, path, updated, original, false, false)
-}
-
 fn write_through_handle_injected(
     file: &mut File,
     path: &str,
@@ -740,7 +1052,7 @@ fn write_through_handle_injected(
     original: &[u8],
     fail_backup: bool,
     fail_after_write: bool,
-) -> Result<(), String> {
+) -> Result<PathBuf, String> {
     if fail_backup {
         return Err("cannot persist ledger recovery copy: injected backup failure".into());
     }
@@ -758,11 +1070,7 @@ fn write_through_handle_injected(
         .and_then(|_| file.set_len(updated.len() as u64))
         .and_then(|_| file.sync_all());
     if let Err(error) = attempt {
-        let restore = file
-            .seek(SeekFrom::Start(0))
-            .and_then(|_| file.write_all(original))
-            .and_then(|_| file.set_len(original.len() as u64))
-            .and_then(|_| file.sync_all());
+        let restore = restore_source(file, original, false, false);
         return Err(match restore {
             Ok(()) => {
                 let _ = fs::remove_file(&backup_path);
@@ -773,9 +1081,130 @@ fn write_through_handle_injected(
             }
         });
     }
-    if let Err(error) = fs::remove_file(&backup_path) {
+    // The caller owns this synced whole-ledger copy until the audit commit succeeds.
+    Ok(backup_path)
+}
+
+fn restore_source(
+    file: &mut File,
+    original: &[u8],
+    inject_failure: bool,
+    partial_failure: bool,
+) -> std::io::Result<()> {
+    if inject_failure {
+        return Err(std::io::Error::other("injected restoration failure"));
+    }
+    if partial_failure {
+        let mut current = Vec::new();
+        file.seek(SeekFrom::Start(0))?;
+        file.read_to_end(&mut current)?;
+        let changed = original
+            .iter()
+            .zip(current.iter())
+            .position(|(before, after)| before != after)
+            .ok_or_else(|| {
+                std::io::Error::other("injected partial restoration had no changed byte")
+            })?;
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(&original[..=changed])?;
+        return Err(std::io::Error::other(
+            "injected restoration failure after partial write",
+        ));
+    }
+    file.seek(SeekFrom::Start(0))
+        .and_then(|_| file.write_all(original))
+        .and_then(|_| file.set_len(original.len() as u64))
+        .and_then(|_| file.sync_all())
+}
+
+#[cfg(windows)]
+fn audited_write(
+    file: &mut File,
+    source_path: &str,
+    updated: &[u8],
+    original: &[u8],
+    audit_dir: &Path,
+    intent: &review_audit::Intent,
+    faults: review_audit::FaultPlan,
+) -> Result<(), String> {
+    let intent_path = review_audit::prepare_fault(audit_dir, intent, faults.intent)
+        .map_err(|e| format!("intent preparation failed: {e}"))?;
+    if faults.stop_after_prepare {
+        return Err(format!(
+            "injected stop after prepared intent: {}",
+            intent_path.display()
+        ));
+    }
+    let backup_path = match write_through_handle_injected(
+        file,
+        source_path,
+        updated,
+        original,
+        false,
+        faults.fail_source_after_write,
+    ) {
+        Ok(path) => path,
+        Err(error) => {
+            if error.contains("original ledger bytes were restored") {
+                if !faults.fail_intent_cleanup {
+                    let _ = review_audit::remove_intent(&intent_path);
+                }
+            } else {
+                return Err(format!(
+                    "ledger write outcome uncertain; recovery required. {}",
+                    error
+                ));
+            }
+            return Err(format!("source write failed: {error}"));
+        }
+    };
+    if faults.stop_after_source {
+        return Err(format!(
+            "injected stop after source write; recovery copy retained at {}",
+            backup_path.display()
+        ));
+    }
+    if let Err(commit_error) = review_audit::commit_fault(audit_dir, intent, faults.commit) {
+        let restore = restore_source(
+            file,
+            original,
+            faults.fail_restore,
+            faults.fail_restore_after_partial,
+        );
+        return match restore {
+            Ok(()) => {
+                let _ = fs::remove_file(&backup_path);
+                Err(format!("audit commit failed after source write; original bytes restored and synced; recovery intent retained: {commit_error}"))
+            }
+            Err(restore_error) => Err(format!("outcome uncertain; recovery required. Audit commit failed ({commit_error}); restoration failed ({restore_error}); complete original ledger retained at {} and intent at {}. Inspect manually; history recovery will not rewrite the ledger.", backup_path.display(), intent_path.display())),
+        };
+    }
+    let intent_cleaned = if faults.fail_intent_cleanup {
+        false
+    } else {
+        match review_audit::remove_intent(&intent_path) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!(
+                    "approval committed; intent cleanup pending at {}: {error}",
+                    intent_path.display()
+                );
+                false
+            }
+        }
+    };
+    // Keep the owned source backup whenever its intent remains, so recovery evidence
+    // remains complete if the process stops before the next reconciliation.
+    if intent_cleaned {
+        if let Err(error) = fs::remove_file(&backup_path) {
+            eprintln!(
+                "approval committed; owned recovery copy cleanup pending at {}: {error}",
+                backup_path.display()
+            );
+        }
+    } else {
         eprintln!(
-            "ledger write succeeded; recovery copy cleanup failed at {}: {error}",
+            "approval committed; recovery copy retained at {}",
             backup_path.display()
         );
     }
@@ -1246,6 +1675,449 @@ mod tests {
         .unwrap_err()
         .contains("changed since"));
         fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn approval_history_reloads_and_undo_preserves_later_unrelated_bytes() {
+        let source="2025-01-01 open Expenses:Food USD\n2025-01-01 open Expenses:Other USD\n2026-01-01 ! \"Shop\"\n  Assets:Bank 1 USD\n  Expenses:Food -1 USD\n";
+        let path = fixture(source);
+        let path_s = path.to_str().unwrap();
+        let row = get_pending_ledger_at(path_s).unwrap().remove(0);
+        approve_ledger_transaction_at(
+            path_s,
+            row.line_num,
+            &row.transaction_id,
+            &row.ledger_revision,
+            "Expenses:Other",
+        )
+        .unwrap();
+        let (ns, dir) = review_audit::test_store(path_s);
+        let history = review_audit::read_records(&dir, &ns).unwrap();
+        assert_eq!(history.len(), 1);
+        let id = history[0].0.operation_id.clone();
+        let unrelated = "2026-02-01 * \"Unrelated\"\n  Assets:Bank 2 USD\n  Expenses:Food -2 USD\n";
+        let changed = format!(
+            "; external note retained\n{}{}",
+            fs::read_to_string(&path).unwrap(),
+            unrelated
+        );
+        fs::write(&path, &changed).unwrap();
+        undo_ledger_approval_with_store(path_s, &id, &dir, &ns).unwrap();
+        let result = fs::read_to_string(&path).unwrap();
+        assert!(result.starts_with("; external note retained\n"));
+        assert!(result.ends_with(unrelated));
+        assert!(
+            result.contains("2026-01-01 ! \"Shop\"\n  Assets:Bank 1 USD\n  Expenses:Food -1 USD\n")
+        );
+        let reloaded = review_audit::read_records(&dir, &ns).unwrap();
+        assert_eq!(reloaded.len(), 2);
+        assert!(review_audit::display(&reloaded)[0].undone);
+        assert!(undo_ledger_approval_with_store(path_s, &id, &dir, &ns).is_err());
+        let _ = fs::remove_file(path);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn audit_publication_faults_preserve_real_ledger_and_leave_reconcilable_intents() {
+        let source="2025-01-01 open Expenses:Food USD\n2025-01-01 open Expenses:Other USD\n2026-01-01 ! \"Shop\"\n  Assets:Bank 1 USD\n  Expenses:Food -1 USD\n";
+        let path = fixture(source);
+        let path_s = path.to_str().unwrap();
+        let (ns, dir) = review_audit::test_store(path_s);
+        let before = fs::read(&path).unwrap();
+        for fault in [
+            review_audit::PersistFault::StagingWrite,
+            review_audit::PersistFault::StagingSync,
+            review_audit::PersistFault::Publish,
+        ] {
+            let row = get_pending_ledger_at(path_s).unwrap().remove(0);
+            let error = approve_ledger_transaction_with_fault(
+                path_s,
+                row.line_num,
+                &row.transaction_id,
+                &row.ledger_revision,
+                "Expenses:Other",
+                &dir,
+                &ns,
+                review_audit::FaultPlan {
+                    intent: fault,
+                    ..review_audit::FaultPlan::NONE
+                },
+            )
+            .unwrap_err();
+            assert!(error.contains("intent preparation failed"), "{error}");
+        }
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(review_audit::read_records(&dir, &ns).unwrap().is_empty());
+        review_audit::reconcile(&dir, &ns, &sha256_hex(&before)).unwrap();
+        assert!(!fs::read_dir(&dir).unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("intent-")));
+
+        let row = get_pending_ledger_at(path_s).unwrap().remove(0);
+        approve_ledger_transaction_with_store(
+            path_s,
+            row.line_num,
+            &row.transaction_id,
+            &row.ledger_revision,
+            "Expenses:Other",
+            &dir,
+            &ns,
+        )
+        .unwrap();
+        let approved = fs::read(&path).unwrap();
+        let id = review_audit::read_records(&dir, &ns).unwrap()[0]
+            .0
+            .operation_id
+            .clone();
+        for fault in [
+            review_audit::PersistFault::StagingWrite,
+            review_audit::PersistFault::StagingSync,
+            review_audit::PersistFault::Publish,
+        ] {
+            let error = undo_ledger_approval_with_fault(
+                path_s,
+                &id,
+                &dir,
+                &ns,
+                review_audit::FaultPlan {
+                    intent: fault,
+                    ..review_audit::FaultPlan::NONE
+                },
+            )
+            .unwrap_err();
+            assert!(error.contains("intent preparation failed"), "{error}");
+        }
+        assert_eq!(fs::read(&path).unwrap(), approved);
+        assert_eq!(review_audit::read_records(&dir, &ns).unwrap().len(), 1);
+        review_audit::reconcile(&dir, &ns, &sha256_hex(&approved)).unwrap();
+        assert_eq!(review_audit::read_records(&dir, &ns).unwrap().len(), 1);
+        let _ = fs::remove_dir_all(dir);
+        let _ = fs::remove_file(path);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn undo_rejects_edited_or_duplicated_transaction_without_mutation() {
+        let source = "2025-01-01 open Expenses:Food USD\n2025-01-01 open Expenses:Other USD\n2026-01-01 ! \"Shop\"\n  Assets:Bank 1 USD\n  Expenses:Food -1 USD\n";
+        let path = fixture(source);
+        let path_s = path.to_str().unwrap();
+        let (ns, dir) = review_audit::test_store(path_s);
+        let row = get_pending_ledger_at(path_s).unwrap().remove(0);
+        approve_ledger_transaction_with_store(
+            path_s,
+            row.line_num,
+            &row.transaction_id,
+            &row.ledger_revision,
+            "Expenses:Other",
+            &dir,
+            &ns,
+        )
+        .unwrap();
+        let id = get_history_with_store(path_s, &dir, &ns).unwrap()[0]
+            .id
+            .clone();
+        let approved = fs::read_to_string(&path).unwrap();
+        let edited = approved.replace("Expenses:Other -1", "Expenses:Food -1");
+        fs::write(&path, &edited).unwrap();
+        assert!(undo_ledger_approval_with_store(path_s, &id, &dir, &ns)
+            .unwrap_err()
+            .contains("undo conflict"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+        assert_eq!(review_audit::read_records(&dir, &ns).unwrap().len(), 1);
+        fs::write(&path, &approved).unwrap();
+        let duplicated = format!("{approved}{approved}");
+        fs::write(&path, &duplicated).unwrap();
+        assert!(undo_ledger_approval_with_store(path_s, &id, &dir, &ns)
+            .unwrap_err()
+            .contains("undo conflict"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), duplicated);
+        assert_eq!(review_audit::read_records(&dir, &ns).unwrap().len(), 1);
+        let _ = fs::remove_dir_all(dir);
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn final_audit_faults_are_injected_after_source_write_for_approval_and_undo() {
+        let source = "2025-01-01 open Expenses:Food USD\n2025-01-01 open Expenses:Other USD\n2026-01-01 ! \"Shop\"\n  Assets:Bank 1 USD\n  Expenses:Food -1 USD\n";
+        let path = fixture(source);
+        let path_s = path.to_str().unwrap();
+        let (ns, dir) = review_audit::test_store(path_s);
+        let before = fs::read(&path).unwrap();
+        let row = get_pending_ledger_at(path_s).unwrap().remove(0);
+        let source_error = approve_ledger_transaction_with_fault(
+            path_s,
+            row.line_num,
+            &row.transaction_id,
+            &row.ledger_revision,
+            "Expenses:Other",
+            &dir,
+            &ns,
+            review_audit::FaultPlan {
+                fail_source_after_write: true,
+                ..review_audit::FaultPlan::NONE
+            },
+        )
+        .unwrap_err();
+        assert!(
+            source_error.contains("source write failed") && source_error.contains("restored"),
+            "{source_error}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(review_audit::read_records(&dir, &ns).unwrap().is_empty());
+        for fault in [
+            review_audit::PersistFault::StagingWrite,
+            review_audit::PersistFault::StagingSync,
+            review_audit::PersistFault::Publish,
+        ] {
+            let before = fs::read(&path).unwrap();
+            let row = get_pending_ledger_at(path_s).unwrap().remove(0);
+            let error = approve_ledger_transaction_with_fault(
+                path_s,
+                row.line_num,
+                &row.transaction_id,
+                &row.ledger_revision,
+                "Expenses:Other",
+                &dir,
+                &ns,
+                review_audit::FaultPlan {
+                    commit: fault,
+                    ..review_audit::FaultPlan::NONE
+                },
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("audit commit failed after source write"),
+                "{error}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), before);
+            assert!(get_history_with_store(path_s, &dir, &ns)
+                .unwrap()
+                .is_empty());
+        }
+        let row = get_pending_ledger_at(path_s).unwrap().remove(0);
+        approve_ledger_transaction_with_store(
+            path_s,
+            row.line_num,
+            &row.transaction_id,
+            &row.ledger_revision,
+            "Expenses:Other",
+            &dir,
+            &ns,
+        )
+        .unwrap();
+        let approved = fs::read(&path).unwrap();
+        let id = get_history_with_store(path_s, &dir, &ns).unwrap()[0]
+            .id
+            .clone();
+        for fault in [
+            review_audit::PersistFault::StagingWrite,
+            review_audit::PersistFault::StagingSync,
+            review_audit::PersistFault::Publish,
+        ] {
+            let error = undo_ledger_approval_with_fault(
+                path_s,
+                &id,
+                &dir,
+                &ns,
+                review_audit::FaultPlan {
+                    commit: fault,
+                    ..review_audit::FaultPlan::NONE
+                },
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("audit commit failed after source write"),
+                "{error}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), approved);
+            assert_eq!(get_history_with_store(path_s, &dir, &ns).unwrap().len(), 1);
+        }
+        let _ = fs::remove_dir_all(dir);
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn restart_reads_real_before_after_and_committed_cleanup_states_once() {
+        let source = "2025-01-01 open Expenses:Food USD\n2025-01-01 open Expenses:Other USD\n2026-01-01 ! \"Shop\"\n  Assets:Bank 1 USD\n  Expenses:Food -1 USD\n";
+        let path = fixture(source);
+        let path_s = path.to_str().unwrap();
+        let (ns, dir) = review_audit::test_store(path_s);
+        let initial = fs::read(&path).unwrap();
+        let row = get_pending_ledger_at(path_s).unwrap().remove(0);
+        let stopped = approve_ledger_transaction_with_fault(
+            path_s,
+            row.line_num,
+            &row.transaction_id,
+            &row.ledger_revision,
+            "Expenses:Other",
+            &dir,
+            &ns,
+            review_audit::FaultPlan {
+                stop_after_prepare: true,
+                ..review_audit::FaultPlan::NONE
+            },
+        )
+        .unwrap_err();
+        assert!(stopped.contains("after prepared intent"));
+        assert_eq!(fs::read(&path).unwrap(), initial);
+        assert!(get_history_with_store(path_s, &dir, &ns)
+            .unwrap()
+            .is_empty());
+
+        let row = get_pending_ledger_at(path_s).unwrap().remove(0);
+        let stopped = approve_ledger_transaction_with_fault(
+            path_s,
+            row.line_num,
+            &row.transaction_id,
+            &row.ledger_revision,
+            "Expenses:Other",
+            &dir,
+            &ns,
+            review_audit::FaultPlan {
+                stop_after_source: true,
+                ..review_audit::FaultPlan::NONE
+            },
+        )
+        .unwrap_err();
+        assert!(stopped.contains("after source write"));
+        let history = get_history_with_store(path_s, &dir, &ns).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(get_history_with_store(path_s, &dir, &ns).unwrap().len(), 1);
+        let approved = fs::read(&path).unwrap();
+        let id = history[0].id.clone();
+        undo_ledger_approval_with_fault(
+            path_s,
+            &id,
+            &dir,
+            &ns,
+            review_audit::FaultPlan {
+                fail_intent_cleanup: true,
+                ..review_audit::FaultPlan::NONE
+            },
+        )
+        .unwrap();
+        let committed_intent = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("intent-")
+            })
+            .unwrap();
+        let mut intent_permissions = fs::metadata(&committed_intent).unwrap().permissions();
+        intent_permissions.set_readonly(true);
+        fs::set_permissions(&committed_intent, intent_permissions).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), initial);
+        let later_edit = [
+            fs::read(&path).unwrap().as_slice(),
+            b"; later unrelated edit\n",
+        ]
+        .concat();
+        fs::write(&path, &later_edit).unwrap();
+        assert!(committed_intent.exists());
+        assert_eq!(get_history_with_store(path_s, &dir, &ns).unwrap().len(), 2);
+        assert_eq!(get_history_with_store(path_s, &dir, &ns).unwrap().len(), 2);
+        assert_eq!(fs::read(&path).unwrap(), later_edit);
+        assert_ne!(approved, later_edit);
+        if committed_intent.exists() {
+            let mut intent_permissions = fs::metadata(&committed_intent).unwrap().permissions();
+            intent_permissions.set_readonly(false);
+            fs::set_permissions(&committed_intent, intent_permissions).unwrap();
+        }
+        let _ = fs::remove_dir_all(dir);
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_commit_and_restore_retains_complete_copy_and_restart_does_not_rewrite() {
+        let source = "2025-01-01 open Expenses:Food USD\n2025-01-01 open Expenses:Other USD\n2026-01-01 ! \"Shop\"\n  Assets:Bank 1 USD\n  Expenses:Food -1 USD\n";
+        let path = fixture(source);
+        let path_s = path.to_str().unwrap();
+        let (ns, dir) = review_audit::test_store(path_s);
+        let before = fs::read(&path).unwrap();
+        let row = get_pending_ledger_at(path_s).unwrap().remove(0);
+        let error = approve_ledger_transaction_with_fault(
+            path_s,
+            row.line_num,
+            &row.transaction_id,
+            &row.ledger_revision,
+            "Expenses:Other",
+            &dir,
+            &ns,
+            review_audit::FaultPlan {
+                commit: review_audit::PersistFault::Publish,
+                fail_restore_after_partial: true,
+                ..review_audit::FaultPlan::NONE
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("outcome uncertain") && error.contains("recovery required"),
+            "{error}"
+        );
+        let copy = error
+            .split("complete original ledger retained at ")
+            .nth(1)
+            .unwrap()
+            .split(" and intent")
+            .next()
+            .unwrap();
+        assert_eq!(fs::read(copy).unwrap(), before);
+        let ambiguous = fs::read(&path).unwrap();
+        let history_error = get_history_with_store(path_s, &dir, &ns).unwrap_err();
+        assert!(history_error.contains("ambiguous"));
+        assert_eq!(fs::read(&path).unwrap(), ambiguous);
+        assert_eq!(fs::read(copy).unwrap(), before);
+        let _ = fs::remove_file(copy);
+        let _ = fs::remove_dir_all(dir);
+        let _ = fs::remove_file(path);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn concurrent_undo_attempts_commit_at_most_one_effect() {
+        let source="2025-01-01 open Expenses:Food USD\n2025-01-01 open Expenses:Other USD\n2026-01-01 ! \"Shop\"\n  Assets:Bank 1 USD\n  Expenses:Food -1 USD\n";
+        let path = fixture(source);
+        let path_s = path.to_str().unwrap().to_string();
+        let row = get_pending_ledger_at(&path_s).unwrap().remove(0);
+        approve_ledger_transaction_at(
+            &path_s,
+            row.line_num,
+            &row.transaction_id,
+            &row.ledger_revision,
+            "Expenses:Other",
+        )
+        .unwrap();
+        let (ns, dir) = review_audit::test_store(&path_s);
+        let id = review_audit::read_records(&dir, &ns).unwrap()[0]
+            .0
+            .operation_id
+            .clone();
+        let path_a = path_s.clone();
+        let dir_a = dir.clone();
+        let ns_a = ns.clone();
+        let id_a = id.clone();
+        let a = std::thread::spawn(move || {
+            undo_ledger_approval_with_store(&path_a, &id_a, &dir_a, &ns_a)
+        });
+        let path_b = path_s.clone();
+        let dir_b = dir.clone();
+        let ns_b = ns.clone();
+        let b = std::thread::spawn(move || {
+            undo_ledger_approval_with_store(&path_b, &id, &dir_b, &ns_b)
+        });
+        let results = [a.join().unwrap(), b.join().unwrap()];
+        assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(review_audit::read_records(&dir, &ns).unwrap().len(), 2);
+        let _ = fs::remove_dir_all(dir);
+        let _ = fs::remove_file(path);
     }
     #[cfg(windows)]
     #[test]
