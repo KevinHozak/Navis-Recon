@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::Digest;
 use std::{
     io::{BufRead, BufReader, Write},
     process::{Command, Stdio},
@@ -19,16 +20,26 @@ enum Phase {
     Cancelled,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum AnalysisOutcome {
+    Success,
+    Partial,
+    Failed,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncRun {
     run_id: Option<String>,
     revision: u64,
     sequence: u64,
     status: Phase,
+    analysis_outcome: Option<AnalysisOutcome>,
     logs: Vec<Value>,
     matches: Vec<Value>,
     unmatched: Vec<Value>,
     errors: Vec<Value>,
+    eligible_match_ids: Vec<String>,
     result: Option<Value>,
 }
 
@@ -39,10 +50,12 @@ impl Default for SyncRun {
             revision: 0,
             sequence: 0,
             status: Phase::Idle,
+            analysis_outcome: None,
             logs: vec![],
             matches: vec![],
             unmatched: vec![],
             errors: vec![],
+            eligible_match_ids: vec![],
             result: None,
         }
     }
@@ -88,6 +101,9 @@ impl Coordinator {
             return None;
         }
         run.status = status;
+        if run.status == Phase::Review {
+            run.analysis_outcome = Some(AnalysisOutcome::Success);
+        }
         run.sequence += 1;
         run.revision += 1;
         Some(run.clone())
@@ -107,13 +123,29 @@ impl Coordinator {
         }
         let mut data = payload;
         strip_worker_identity(&mut data);
+        if event == "match" {
+            if !valid_match(&data) {
+                return None;
+            }
+            let canonical = serde_json::to_vec(&data).ok()?;
+            let digest = sha2::Sha256::digest(canonical);
+            data["match_id"] = json!(format!("{}:{}", id, hex(&digest)));
+            if run
+                .matches
+                .iter()
+                .any(|existing| existing.get("match_id") == data.get("match_id"))
+            {
+                return None;
+            }
+        }
         match event {
             "log" => run.logs.push(data.clone()),
             "match" => run.matches.push(data.clone()),
-            "unmatched" => run.unmatched.push(data.clone()),
-            "error" => run.errors.push(data.clone()),
+            "unmatched" => run.unmatched.push(sanitize_diagnostic(data.clone())),
+            "error" => run.errors.push(sanitize_diagnostic(data.clone())),
             _ => {}
         }
+        refresh_eligible(&mut run);
         run.sequence += 1;
         run.revision += 1;
         let envelope = json!({
@@ -126,8 +158,8 @@ impl Coordinator {
         });
         Some((run.clone(), envelope))
     }
-    fn begin_commit(&self, id: &str, payload: &[Value]) -> Result<SyncRun, String> {
-        if payload.is_empty() {
+    fn begin_commit(&self, id: &str, ids: &[String]) -> Result<(SyncRun, Vec<Value>), String> {
+        if ids.is_empty() {
             return Err("Select at least one match to commit".into());
         }
         let mut run = self.current.lock().unwrap();
@@ -137,19 +169,42 @@ impl Coordinator {
         if run.status != Phase::Review {
             return Err("Sync run is not in review".into());
         }
+        if !matches!(
+            run.analysis_outcome,
+            Some(AnalysisOutcome::Success | AnalysisOutcome::Partial)
+        ) {
+            return Err("Sync analysis has no positive outcome and cannot be committed".into());
+        }
+        let mut selected_ids = Vec::new();
         let mut selected = Vec::new();
-        for item in payload {
-            if !run.matches.contains(item) || selected.contains(&item) {
+        for match_id in ids {
+            if selected_ids.contains(match_id) {
                 return Err(
                     "Commit selection does not belong to this run's analysis results".into(),
                 );
             }
-            selected.push(item);
+            let mut resolved = run
+                .matches
+                .iter()
+                .filter(|m| {
+                    run.eligible_match_ids
+                        .iter()
+                        .any(|eligible| m["match_id"] == *eligible)
+                })
+                .find(|m| m["match_id"] == *match_id)
+                .cloned()
+                .ok_or("Commit selection does not belong to this run's analysis results")?;
+            resolved
+                .as_object_mut()
+                .ok_or("Malformed stored match")?
+                .remove("match_id");
+            selected.push(resolved);
+            selected_ids.push(match_id.clone());
         }
         run.status = Phase::Committing;
         run.sequence += 1;
         run.revision += 1;
-        Ok(run.clone())
+        Ok((run.clone(), selected))
     }
     fn cancel_review(&self, id: &str) -> Result<SyncRun, String> {
         let mut run = self.current.lock().unwrap();
@@ -171,7 +226,71 @@ fn strip_worker_identity(value: &mut Value) {
         object.remove("run_id");
         object.remove("revision");
         object.remove("sequence");
+        object.remove("match_id");
     }
+}
+
+fn valid_match(value: &Value) -> bool {
+    value.is_object()
+        && value
+            .get("filename")
+            .and_then(Value::as_str)
+            .is_some_and(|v| !v.trim().is_empty())
+        && value
+            .get("new_name")
+            .and_then(Value::as_str)
+            .is_some_and(|v| !v.trim().is_empty())
+}
+
+fn refresh_eligible(run: &mut SyncRun) {
+    if run.errors.iter().any(|item| {
+        item.get("protocol_error").and_then(Value::as_bool) == Some(true)
+            || item
+                .get("filename")
+                .and_then(Value::as_str)
+                .is_none_or(|name| name.trim().is_empty())
+    }) || run.unmatched.iter().any(|item| {
+        item.get("filename")
+            .and_then(Value::as_str)
+            .is_none_or(|name| name.trim().is_empty())
+    }) {
+        run.eligible_match_ids.clear();
+        return;
+    }
+    let blocked: std::collections::HashSet<&str> = run
+        .errors
+        .iter()
+        .chain(run.unmatched.iter())
+        .filter_map(|item| item.get("filename").and_then(Value::as_str))
+        .collect();
+    let mut counts = std::collections::HashMap::<&str, usize>::new();
+    for item in &run.matches {
+        if let Some(filename) = item.get("filename").and_then(Value::as_str) {
+            *counts.entry(filename).or_default() += 1;
+        }
+    }
+    run.eligible_match_ids = run
+        .matches
+        .iter()
+        .filter_map(|item| {
+            let filename = item.get("filename")?.as_str()?;
+            let id = item.get("match_id")?.as_str()?;
+            (!blocked.contains(filename) && counts.get(filename) == Some(&1)).then(|| id.to_owned())
+        })
+        .collect();
+}
+
+fn sanitize_diagnostic(value: Value) -> Value {
+    if !value.is_object()
+        || value.get("filename").is_some_and(|v| !v.is_string())
+        || value.get("message").is_some_and(|v| !v.is_string())
+    {
+        return json!({"message":"Malformed diagnostic record", "protocol_error":true});
+    }
+    value
+}
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 static COORDINATOR: OnceLock<Arc<Coordinator>> = OnceLock::new();
@@ -219,7 +338,22 @@ fn terminal(
     if run.run_id.as_deref() != Some(id) || run.status != expected {
         return;
     }
-    run.status = status;
+    run.status = status.clone();
+    if expected == Phase::Analyzing {
+        run.analysis_outcome = Some(if status == Phase::Failed {
+            AnalysisOutcome::Failed
+        } else {
+            match payload
+                .get("analysis_outcome")
+                .and_then(Value::as_str)
+                .unwrap_or("success")
+            {
+                "partial" => AnalysisOutcome::Partial,
+                "failed" => AnalysisOutcome::Failed,
+                _ => AnalysisOutcome::Success,
+            }
+        });
+    }
     run.sequence += 1;
     run.revision += 1;
     let mut envelope = json!({
@@ -236,18 +370,49 @@ fn terminal(
 }
 
 fn parse_line(c: &Coordinator, sink: &dyn EventSink, id: &str, line: &str) -> bool {
-    let (kind, payload): (&'static str, Value) = match serde_json::from_str::<Value>(line) {
+    let parsed = serde_json::from_str::<Value>(line);
+    let (kind, payload): (&'static str, Value) = match parsed {
         Ok(value) => match value.get("type").and_then(Value::as_str) {
             Some("log") => ("log", value),
             Some("match") => ("match", value),
             Some("unmatched") => ("unmatched", value),
             Some("error") => ("error", value),
+            _ if value.is_object() || value.is_array() => {
+                publish(
+                    c,
+                    sink,
+                    id,
+                    "error",
+                    json!({"message":"Unknown structured analyzer record type", "protocol_error":true}),
+                );
+                return true;
+            }
             _ => ("log", json!({"message": line})),
         },
+        Err(_) if line.trim_start().starts_with(['{', '[']) => {
+            publish(
+                c,
+                sink,
+                id,
+                "error",
+                json!({"message":"Malformed structured analyzer output", "protocol_error":true}),
+            );
+            return true;
+        }
         Err(_) => ("log", json!({"message": line})),
     };
+    if kind == "match" && !valid_match(&payload) {
+        publish(
+            c,
+            sink,
+            id,
+            "error",
+            json!({"message":"Malformed match: filename and new_name must be nonempty strings", "filename":payload.get("filename").cloned().unwrap_or(Value::Null), "protocol_error":true}),
+        );
+        return true;
+    }
     publish(c, sink, id, kind, payload);
-    kind == "error"
+    false
 }
 
 fn analyze_worker(
@@ -291,21 +456,30 @@ fn analyze_worker(
         let id = id.to_owned();
         let sink = sink.duplicate();
         std::thread::spawn(move || {
-            for line in BufReader::new(stream).lines().flatten() {
-                publish(
-                    &c_err,
-                    sink.as_ref(),
-                    &id,
-                    "error",
-                    json!({"message": line}),
-                );
+            for line in BufReader::new(stream).lines() {
+                match line {
+                    Ok(line) => publish(&c_err, sink.as_ref(), &id, "log", json!({"message": line, "level":"warning", "source":"stderr"})),
+                    Err(error) => publish(&c_err, sink.as_ref(), &id, "error", json!({"message":format!("Unable to read analyzer stderr: {error}"), "protocol_error":true})),
+                }
             }
         })
     });
-    let mut structured_error = false;
+    let mut fatal = false;
     if let Some(stdout) = stdout {
-        for line in BufReader::new(stdout).lines().flatten() {
-            structured_error |= parse_line(c, sink, id, &line);
+        for line in BufReader::new(stdout).lines() {
+            match line {
+                Ok(line) => fatal |= parse_line(c, sink, id, &line),
+                Err(error) => {
+                    fatal = true;
+                    publish(
+                        c,
+                        sink,
+                        id,
+                        "error",
+                        json!({"message":format!("Unable to read analyzer output: {error}"), "protocol_error":true}),
+                    );
+                }
+            }
         }
     }
     let status = child.wait();
@@ -313,21 +487,47 @@ fn analyze_worker(
         let _ = thread.join();
     }
     match status {
-        Ok(status) if status.success() && !structured_error => terminal(
-            c,
-            sink,
-            id,
-            Phase::Analyzing,
-            Phase::Review,
-            json!({"status":"success"}),
-        ),
+        Ok(status) if status.success() && !fatal => {
+            let snapshot = c.snapshot();
+            let global_error = snapshot.errors.iter().any(|e| {
+                e.get("protocol_error").and_then(Value::as_bool) == Some(true)
+                    || e.get("filename")
+                        .and_then(Value::as_str)
+                        .is_none_or(|f| f.trim().is_empty())
+            }) || snapshot.unmatched.iter().any(|item| {
+                item.get("filename")
+                    .and_then(Value::as_str)
+                    .is_none_or(|f| f.trim().is_empty())
+            });
+            let diagnostics = !snapshot.errors.is_empty() || !snapshot.unmatched.is_empty();
+            let outcome = if global_error || (diagnostics && snapshot.eligible_match_ids.is_empty())
+            {
+                "failed"
+            } else if diagnostics {
+                "partial"
+            } else {
+                "success"
+            };
+            terminal(
+                c,
+                sink,
+                id,
+                Phase::Analyzing,
+                if outcome == "failed" {
+                    Phase::Failed
+                } else {
+                    Phase::Review
+                },
+                json!({"status":outcome,"analysis_outcome":outcome}),
+            );
+        }
         Ok(status) if status.success() => terminal(
             c,
             sink,
             id,
             Phase::Analyzing,
             Phase::Failed,
-            json!({"status":"error"}),
+            json!({"status":"error","analysis_outcome":"failed"}),
         ),
         Ok(status) => {
             publish(
@@ -557,10 +757,10 @@ pub fn start_ledger_sync(app: AppHandle) -> Result<SyncRun, String> {
 pub fn commit_ledger_sync(
     app: AppHandle,
     run_id: String,
-    payload: Vec<Value>,
+    payload: Vec<String>,
 ) -> Result<SyncRun, String> {
     let c = coordinator();
-    let run = c.begin_commit(&run_id, &payload)?;
+    let (run, original) = c.begin_commit(&run_id, &payload)?;
     let id = run_id;
     publish_state(&app, &run);
     let args = vec![
@@ -568,7 +768,7 @@ pub fn commit_ledger_sync(
         "--commit".into(),
     ];
     tauri::async_runtime::spawn_blocking(move || {
-        commit_worker(c, &app, &id, "python", &args, payload)
+        commit_worker(c, &app, &id, "python", &args, original)
     });
     Ok(run)
 }
@@ -666,6 +866,15 @@ mod tests {
     fn start(c: &Coordinator) -> SyncRun {
         c.reserve(Phase::Analyzing).unwrap()
     }
+    fn seed_review(c: &Coordinator, id: &str, mut item: Value) -> (String, Value) {
+        item["type"] = json!("match");
+        item["filename"] = json!("synthetic.pdf");
+        item["new_name"] = json!("renamed.pdf");
+        c.event(id, "match", item).unwrap();
+        let stored = c.snapshot().matches[0].clone();
+        c.transition(id, Phase::Review).unwrap();
+        (stored["match_id"].as_str().unwrap().to_owned(), stored)
+    }
 
     #[test]
     fn analysis_reservation_rejects_duplicate_and_review_blocks_new_run() {
@@ -705,14 +914,12 @@ mod tests {
         let c = Arc::new(Coordinator::default());
         let run = start(&c);
         let id = run.run_id.unwrap();
-        c.event(&id, "match", json!({"filename":"synthetic.pdf"}))
-            .unwrap();
-        c.transition(&id, Phase::Review).unwrap();
-        let payload = vec![json!({"filename":"synthetic.pdf"})];
-        c.begin_commit(&id, &payload).unwrap();
-        assert!(c.begin_commit(&id, &payload).is_err());
+        let (match_id, _) = seed_review(&c, &id, json!({}));
+        let ids = vec![match_id];
+        let (_, resolved) = c.begin_commit(&id, &ids).unwrap();
+        assert!(c.begin_commit(&id, &ids).is_err());
         let commit_script = temp.script(&format!(
-            "import sys\nopen(sys.argv[1], 'a').write('commit\\n')\nsys.stdin.read()\n"
+            "import sys\nopen(sys.argv[1], 'a').write('commit\\n')\ndata=sys.stdin.read()\nopen(sys.argv[1]+'.payload','w').write(data)\n"
         ));
         let sink = FakeSink::default();
         commit_worker(
@@ -720,12 +927,16 @@ mod tests {
             &sink,
             &id,
             &python(),
-            &[commit_script, counter],
-            payload,
+            &[commit_script, counter.clone()],
+            resolved.clone(),
         );
         let launches = fs::read_to_string(temp.0.join("launches.txt")).unwrap();
         assert_eq!(launches.lines().count(), 2);
         assert_eq!(launches.lines().filter(|line| *line == "commit").count(), 1);
+        let received: Value =
+            serde_json::from_str(&fs::read_to_string(format!("{}.payload", counter)).unwrap())
+                .unwrap();
+        assert_eq!(received, json!(resolved));
     }
 
     #[test]
@@ -733,22 +944,57 @@ mod tests {
         let c = Arc::new(Coordinator::default());
         let run = start(&c);
         let id = run.run_id.unwrap();
-        c.event(&id, "match", json!({"filename":"synthetic.pdf"}))
-            .unwrap();
-        c.transition(&id, Phase::Review).unwrap();
-        assert!(c
-            .begin_commit("stale", &[json!({"filename":"synthetic.pdf"})])
-            .is_err());
+        let (match_id, _) = seed_review(&c, &id, json!({}));
+        assert!(c.begin_commit("stale", &[match_id.clone()]).is_err());
         assert!(c.begin_commit(&id, &[]).is_err());
+        assert!(c.begin_commit(&id, &["forged".to_owned()]).is_err());
         assert!(c
-            .begin_commit(&id, &[json!({"filename":"forged.pdf"})])
+            .begin_commit(&id, &[match_id.clone(), match_id.clone()])
             .is_err());
-        assert!(c
-            .begin_commit(&id, &[json!({"filename":"synthetic.pdf"})])
-            .is_ok());
-        assert!(c
-            .begin_commit(&id, &[json!({"filename":"synthetic.pdf"})])
-            .is_err());
+        assert!(c.begin_commit(&id, &[match_id.clone()]).is_ok());
+        assert!(c.begin_commit(&id, &[match_id]).is_err());
+    }
+
+    #[test]
+    fn backend_identity_replay_and_commit_payload_are_authoritative() {
+        let c = Coordinator::default();
+        let first = start(&c);
+        let id = first.run_id.unwrap();
+        let original = json!({"filename":"synthetic.pdf","new_name":"renamed.pdf","run_id":"spoof","revision":999,"sequence":888,"match_id":"child"});
+        let (snap, _) = c.event(&id, "match", original.clone()).unwrap();
+        let backend_id = snap.matches[0]["match_id"].as_str().unwrap().to_owned();
+        let revision = snap.revision;
+        assert!(c.event(&id, "match", original.clone()).is_none());
+        assert_eq!(c.snapshot().revision, revision);
+        let changed = json!({"filename":"other-source.pdf","new_name":"other.pdf"});
+        c.event(&id, "match", changed).unwrap();
+        c.transition(&id, Phase::Review).unwrap();
+        let resolved = c.begin_commit(&id, &[backend_id.clone()]).unwrap().1;
+        assert_eq!(
+            resolved,
+            vec![json!({"filename":"synthetic.pdf","new_name":"renamed.pdf"})]
+        );
+        assert!(resolved[0].get("match_id").is_none());
+        let other = Coordinator::default();
+        let next = start(&other);
+        other
+            .event(next.run_id.as_deref().unwrap(), "match", original)
+            .unwrap();
+        assert_ne!(other.snapshot().matches[0]["match_id"], backend_id);
+    }
+
+    #[test]
+    fn invalid_utf8_after_useful_match_fails_and_retains_diagnostic() {
+        let temp = TempDir::new();
+        let script = temp.script("import sys\nsys.stdout.buffer.write(b'{\\\"type\\\":\\\"match\\\",\\\"filename\\\":\\\"synthetic.pdf\\\",\\\"new_name\\\":\\\"renamed.pdf\\\"}\\n\\xff\\n')\n");
+        let c = Arc::new(Coordinator::default());
+        let id = start(&c).run_id.unwrap();
+        analyze_worker(c.clone(), &FakeSink::default(), &id, &python(), &[script]);
+        let snapshot = c.snapshot();
+        assert_eq!(snapshot.status, Phase::Failed);
+        assert_eq!(snapshot.matches.len(), 1);
+        assert!(!snapshot.errors.is_empty());
+        assert!(snapshot.eligible_match_ids.is_empty());
     }
 
     #[test]
@@ -927,27 +1173,105 @@ mod tests {
     }
 
     #[test]
+    fn analysis_outcome_classifies_empty_partial_global_and_protocol_failures() {
+        let cases = [
+            ("", Phase::Review, "success", 0),
+            ("print(json.dumps({'type':'match','filename':'a.pdf','new_name':'b.pdf'}))\nprint(json.dumps({'type':'unmatched','filename':'c.pdf','message':'no rule'}))", Phase::Review, "partial", 1),
+            ("print(json.dumps({'type':'match','filename':'a.pdf','new_name':'b.pdf'}))\nprint(json.dumps({'type':'unmatched','filename':'a.pdf','message':'no rule'}))", Phase::Failed, "failed", 1),
+            ("print(json.dumps({'type':'match','filename':'a.pdf','new_name':'b.pdf'}))\nprint(json.dumps({'type':'error','filename':'a.pdf','message':'file issue'}))", Phase::Failed, "failed", 1),
+            ("print(json.dumps({'type':'match','filename':'a.pdf','new_name':'b.pdf'}))\nprint(json.dumps({'type':'error','message':'global issue'}))", Phase::Failed, "failed", 1),
+            ("print(json.dumps({'type':'error','filename':'a.pdf','message':'file issue'}))", Phase::Failed, "failed", 0),
+            ("print(json.dumps({'type':'match','filename':'a.pdf','new_name':'b.pdf'}))\nprint(json.dumps({'type':'error','filename':'a.pdf','message':{'unsafe':'object'}}))", Phase::Failed, "failed", 1),
+            ("print(json.dumps({'type':'match','filename':'a.pdf','new_name':'b.pdf'}))\nsys.exit(4)", Phase::Failed, "failed", 1),
+            ("print(json.dumps({'type':'match','filename':'a.pdf'}))", Phase::Failed, "failed", 0),
+            ("print('{broken json')", Phase::Failed, "failed", 0),
+        ];
+        for (body, expected_status, expected_outcome, expected_matches) in cases {
+            let temp = TempDir::new();
+            let script = temp.script(&format!("import json,sys\n{body}\n"));
+            let c = Arc::new(Coordinator::default());
+            let id = start(&c).run_id.unwrap();
+            analyze_worker(c.clone(), &FakeSink::default(), &id, &python(), &[script]);
+            let snapshot = c.snapshot();
+            assert_eq!(snapshot.status, expected_status, "fixture: {body}");
+            assert_eq!(
+                snapshot.analysis_outcome,
+                Some(match expected_outcome {
+                    "success" => AnalysisOutcome::Success,
+                    "partial" => AnalysisOutcome::Partial,
+                    _ => AnalysisOutcome::Failed,
+                })
+            );
+            assert_eq!(snapshot.matches.len(), expected_matches, "fixture: {body}");
+        }
+    }
+
+    #[test]
+    fn partial_commit_excludes_diagnostic_sources_and_conflicting_duplicates() {
+        let temp = TempDir::new();
+        let script = temp.script("import json\nprint(json.dumps({'type':'match','filename':'a.pdf','new_name':'a-new.pdf'}))\nprint(json.dumps({'type':'match','filename':'b.pdf','new_name':'b-new.pdf'}))\nprint(json.dumps({'type':'error','filename':'a.pdf','message':'blocked'}))\n");
+        let c = Arc::new(Coordinator::default());
+        let id = start(&c).run_id.unwrap();
+        analyze_worker(c.clone(), &FakeSink::default(), &id, &python(), &[script]);
+        let snapshot = c.snapshot();
+        assert_eq!(snapshot.analysis_outcome, Some(AnalysisOutcome::Partial));
+        assert_eq!(snapshot.eligible_match_ids.len(), 1);
+        assert_eq!(
+            snapshot
+                .matches
+                .iter()
+                .find(|m| m["filename"] == "b.pdf")
+                .unwrap()["match_id"],
+            snapshot.eligible_match_ids[0]
+        );
+        let (committing, payload) = c.begin_commit(&id, &snapshot.eligible_match_ids).unwrap();
+        assert_eq!(committing.status, Phase::Committing);
+        assert_eq!(payload.len(), 1);
+        assert_eq!(payload[0]["filename"], "b.pdf");
+
+        let c = Coordinator::default();
+        let id = start(&c).run_id.unwrap();
+        let (match_id, _) = seed_review(&c, &id, json!({}));
+        c.current.lock().unwrap().analysis_outcome = Some(AnalysisOutcome::Failed);
+        assert!(c.begin_commit(&id, &[match_id]).is_err());
+
+        let c = Coordinator::default();
+        let id = start(&c).run_id.unwrap();
+        c.event(
+            &id,
+            "match",
+            json!({"filename":"same.pdf","new_name":"one.pdf"}),
+        )
+        .unwrap();
+        c.event(
+            &id,
+            "match",
+            json!({"filename":"same.pdf","new_name":"two.pdf"}),
+        )
+        .unwrap();
+        c.transition(&id, Phase::Review).unwrap();
+        let snapshot = c.snapshot();
+        assert!(snapshot.eligible_match_ids.is_empty());
+        assert!(c
+            .begin_commit(
+                &id,
+                &[snapshot.matches[0]["match_id"].as_str().unwrap().to_owned()]
+            )
+            .is_err());
+    }
+
+    #[test]
     fn fake_commit_worker_is_async_path_and_structured_error_is_failure() {
         let temp = TempDir::new();
         let script = temp.script("import json,sys\nsys.stdin.read()\nprint(json.dumps({'type':'error','message':'synthetic rejected'}))\n");
         let c = Arc::new(Coordinator::default());
         let run = start(&c);
         let id = run.run_id.unwrap();
-        c.event(&id, "match", json!({"filename":"synthetic.pdf"}))
-            .unwrap();
-        c.transition(&id, Phase::Review).unwrap();
-        c.begin_commit(&id, &[json!({"filename":"synthetic.pdf"})])
-            .unwrap();
+        let (match_id, _) = seed_review(&c, &id, json!({}));
+        let (_, resolved) = c.begin_commit(&id, &[match_id]).unwrap();
         let events = Arc::new(Mutex::new(vec![]));
         let sink = SharedSink(events.clone());
-        commit_worker(
-            c.clone(),
-            &sink,
-            &id,
-            &python(),
-            &[script],
-            vec![json!({"filename":"synthetic.pdf"})],
-        );
+        commit_worker(c.clone(), &sink, &id, &python(), &[script], resolved);
         assert_eq!(c.snapshot().status, Phase::Failed);
         assert!(events
             .lock()
@@ -961,12 +1285,20 @@ mod tests {
         let c = Coordinator::default();
         let run = start(&c);
         let id = run.run_id.unwrap();
-        c.event(&id, "match", json!({"filename":"synthetic.pdf"}))
-            .unwrap();
+        c.event(
+            &id,
+            "match",
+            json!({"filename":"synthetic.pdf", "new_name":"renamed.pdf"}),
+        )
+        .unwrap();
         c.transition(&id, Phase::Review).unwrap();
         let sink = FakeSink::default();
         assert!(c
-            .event(&id, "match", json!({"filename":"late.pdf"}))
+            .event(
+                &id,
+                "match",
+                json!({"filename":"late.pdf", "new_name":"late.pdf"})
+            )
             .is_none());
         terminal(
             &c,
@@ -998,18 +1330,16 @@ print('received:' + str(len(data)))
         let c = Arc::new(Coordinator::default());
         let run = start(&c);
         let id = run.run_id.unwrap();
-        let item = json!({"filename":"synthetic.pdf","detail":"x".repeat(128 * 1024)});
-        c.event(&id, "match", item.clone()).unwrap();
-        c.transition(&id, Phase::Review).unwrap();
-        c.begin_commit(&id, &[item.clone()]).unwrap();
+        let item = json!({"filename":"synthetic.pdf","new_name":"renamed.pdf","detail":"x".repeat(128 * 1024)});
+        let (match_id, _) = seed_review(&c, &id, item);
+        let (_, resolved) = c.begin_commit(&id, &[match_id]).unwrap();
         let events = Arc::new(Mutex::new(vec![]));
         let sink = SharedSink(events.clone());
         let worker = std::thread::spawn({
             let c = c.clone();
             let script = script.clone();
             let id = id.clone();
-            let item = item.clone();
-            move || commit_worker(c, &sink, &id, &python(), &[script], vec![item])
+            move || commit_worker(c, &sink, &id, &python(), &[script], resolved)
         });
         assert!(worker.join().is_ok());
         assert_eq!(c.snapshot().status, Phase::Complete);

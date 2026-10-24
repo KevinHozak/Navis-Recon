@@ -118,10 +118,10 @@ test('sync IPC uses the native runId and payload argument mapping', async () => 
   const hadWindow = Object.hasOwn(globalThis, 'window'); const originalWindow = globalThis.window; const calls = []
   try {
     globalThis.window = { __TAURI_INTERNALS__: { invoke: async (command, args) => { calls.push({ command, args }); return {} } } }
-    await startLedgerSync(); await commitLedgerSync('sync-7', [{ filename: 'a.pdf' }]); await cancelSyncRun('sync-7')
+    await startLedgerSync(); await commitLedgerSync('sync-7', ['sync-7:match-hash']); await cancelSyncRun('sync-7')
     assert.deepEqual(calls, [
       { command: 'start_ledger_sync', args: {} },
-      { command: 'commit_ledger_sync', args: { runId: 'sync-7', payload: [{ filename: 'a.pdf' }] } },
+      { command: 'commit_ledger_sync', args: { runId: 'sync-7', payload: ['sync-7:match-hash'] } },
       { command: 'cancel_sync_run', args: { runId: 'sync-7' } },
     ])
   } finally { if (hadWindow) globalThis.window = originalWindow; else delete globalThis.window }
