@@ -9,6 +9,8 @@ mod records;
 mod review_audit;
 mod statements;
 mod sync;
+mod sync_process;
+mod sync_receipts;
 
 pub fn run() {
     tauri::Builder::default()
@@ -37,11 +39,13 @@ pub fn run() {
             statements::open_statement_file,
             sync::start_ledger_sync,
             sync::get_sync_run,
+            sync::get_sync_receipts,
             sync::get_sync_outcomes,
             sync::reconcile_ledger_sync,
             sync::retry_ledger_sync,
             sync::commit_ledger_sync,
             sync::cancel_sync_run,
+            sync::reveal_sync_source,
             ping
         ])
         .run(tauri::generate_context!())

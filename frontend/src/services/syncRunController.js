@@ -42,7 +42,9 @@ function validRun(run) {
     (['analyzing', 'idle'].includes(run.status) ? run.analysis_outcome === null : ['success', 'partial', 'failed'].includes(run.analysis_outcome)) &&
     new Set(run.matches.map(match => match?.match_id)).size === run.matches.length && run.matches.every(match => typeof match?.match_id === 'string' && match.match_id.length > 0 && typeof match.filename === 'string' && match.filename.length > 0 && typeof match.new_name === 'string' && match.new_name.length > 0) &&
     (run.eligible_match_ids === undefined || (Array.isArray(run.eligible_match_ids) && new Set(run.eligible_match_ids).size === run.eligible_match_ids.length && run.eligible_match_ids.every(id => run.matches.some(match => match.match_id === id)))) &&
-    (!['review', 'committing', 'complete', 'cancelled'].includes(run.status) || ['success', 'partial'].includes(run.analysis_outcome)) &&
+    (!['review', 'committing', 'complete'].includes(run.status) || ['success', 'partial'].includes(run.analysis_outcome)) &&
+    (run.status !== 'cancelled' || ['success', 'partial', 'failed'].includes(run.analysis_outcome)) &&
+    (run.cancelling === undefined || typeof run.cancelling === 'boolean') &&
     (run.managed_outcomes === undefined || validManagedOutcomes(run.managed_outcomes)) && Object.hasOwn(run, 'result') && (run.result === null || (typeof run.result === 'object' && !Array.isArray(run.result))))
 }
 
@@ -57,9 +59,26 @@ export function createSyncRunController({ api, onChange = () => {}, selectionSto
   let ready = false
   let error = null
   let recovery = []
+  let receipts = []
+  let receiptError = null
+  let receiptRequest = 0
   let recoveryError = null
   let recoveryRequest = 0
-  const publish = () => { if (!disposed) onChange({ run: state, pending, ready, recovery, recoveryError, selectedIds: selectionStore.values(state), ...(error ? { error } : {}) }) }
+  const publish = () => { if (!disposed) onChange({ run: state, pending, ready, recovery, recoveryError, receipts, receiptError, selectedIds: selectionStore.values(state), ...(error ? { error } : {}) }) }
+
+  async function refreshReceipts(current = generation) {
+    if (disposed || typeof api.getSyncReceipts !== 'function') return false
+    const request = ++receiptRequest
+    try {
+      const result = await api.getSyncReceipts()
+      if (disposed || current !== generation || request !== receiptRequest) return false
+      if (!result || !Array.isArray(result.receipts) || !(result.error === null || typeof result.error === 'string')) throw new Error('Sync service returned malformed receipts.')
+      receipts = result.receipts; receiptError = result.error; publish(); return !result.error
+    } catch (failure) {
+      if (!disposed && current === generation && request === receiptRequest) { receiptError = failure; publish() }
+      return false
+    }
+  }
 
   async function refreshOutcomes(current = generation) {
     if (disposed || typeof api.reconcileLedgerSync !== 'function') return false
@@ -108,7 +127,7 @@ export function createSyncRunController({ api, onChange = () => {}, selectionSto
       if (!validRun(initial)) throw new Error('Sync service returned a malformed snapshot.')
       if (!state || initial.revision > state.revision) accept(initial, current)
       ready = true; error = null; publish()
-      await refreshOutcomes(current)
+      await Promise.all([refreshOutcomes(current), refreshReceipts(current)])
       return true
     } catch (failure) {
       if (!disposed && current === generation) { ready = false; error = failure; publish() }
@@ -166,8 +185,14 @@ export function createSyncRunController({ api, onChange = () => {}, selectionSto
       const valid = ids.length > 0 && ids.every(id => typeof id === 'string' && eligible.includes(id))
       return ready && state?.status === 'review' && ['success', 'partial'].includes(state.analysis_outcome) && valid ? invoke(() => api.commitLedgerSync(state.run_id, ids)) : Promise.resolve(false)
     },
-    cancel: () => ready && state?.status === 'review' ? invoke(() => api.cancelSyncRun(state.run_id)) : Promise.resolve(false),
+    cancel: () => ready && ['review', 'analyzing', 'committing'].includes(state?.status) && !state?.cancelling ? invoke(() => api.cancelSyncRun(state.run_id)) : Promise.resolve(false),
+    revealSource(refs) {
+      if (disposed || !ready || pending || state?.cancelling || typeof api.revealSyncSource !== 'function') return Promise.resolve(false)
+      const current=generation
+      return Promise.resolve().then(()=>api.revealSyncSource(refs)).then(()=>!disposed && current===generation).catch(failure=>{ if(!disposed && current===generation){ error=failure; publish() } return false })
+    },
     refreshOutcomes: () => ready && !pending ? refreshOutcomes(generation) : Promise.resolve(false),
+    refreshReceipts: () => ready ? refreshReceipts(generation) : Promise.resolve(false),
     retryOutcomes() {
       const safe = recovery.filter(item => item.state === 'failed' && item.retry_safe && typeof item.operation_id === 'string' && /^[a-f0-9]{64}$/i.test(item.operation_id)).map(item => item.operation_id)
       if (!ready || pending || !safe.length || typeof api.retryLedgerSync !== 'function' || (state && !terminal.has(state.status) && state.status !== 'idle')) return Promise.resolve(false)
@@ -179,6 +204,6 @@ export function createSyncRunController({ api, onChange = () => {}, selectionSto
     },
     toggle(matchId) { if (!pending && ready && (state?.status === 'analyzing' || state?.status === 'review') && (state.status !== 'review' || (state.eligible_match_ids || state.matches.map(match => match.match_id)).includes(matchId))) { selectionStore.toggle(state, matchId); publish() } },
     dispose() { disposed = true; generation += 1; registration?.abort(); registration = null; unlisten?.(); unlisten = null },
-    getState: () => ({ run: state, pending, ready, recovery, recoveryError }),
+    getState: () => ({ run: state, pending, ready, recovery, recoveryError, receipts, receiptError }),
   }
 }

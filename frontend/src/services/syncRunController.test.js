@@ -166,6 +166,8 @@ test('controller blocks actions until connection and reports setup failure', asy
   controller.dispose()
 })
 
+test('source reveal rejects stale completion after disposal and reports live failures',async()=>{const gate=deferred();let errors=[];const controller=createSyncRunController({onChange:v=>errors.push(v.error),api:{listenForSyncEvents:async()=>()=>{},getSyncRun:async()=>snapshot(null,0),revealSyncSource:()=>gate.promise}});await controller.connect();const pending=controller.revealSource({sourceRef:'src:'+`a`.repeat(64)});controller.dispose();gate.resolve();assert.equal(await pending,false);const live=createSyncRunController({onChange:v=>errors.push(v.error),api:{listenForSyncEvents:async()=>()=>{},getSyncRun:async()=>snapshot(null,0),revealSyncSource:async()=>{throw Error('safe failure')}}});await live.connect();assert.equal(await live.revealSource({}),false);assert.match(errors.at(-1).message,/safe failure/);live.dispose()})
+
 
 test('reconnect removes prior handlers and ignores a superseded snapshot reply', async () => {
   const snapshotGate = deferred(); let registrations = 0; let removals = 0
@@ -327,4 +329,11 @@ test('controller ignores selection toggles while a commit is pending', async () 
   await controller.connect(); assert.deepEqual([...views.at(-1).selectedIds],['m'])
   const committing=controller.commit(['m']); controller.toggle('m'); assert.deepEqual([...views.at(-1).selectedIds],['m'])
   gate.resolve({...review,revision:3,sequence:3,status:'committing'}); await committing; controller.dispose()
+})
+
+
+test('cancelled failed analysis is a valid terminal snapshot and receipts fail visibly without replacing outcomes', async () => {
+  const cancelled={...snapshot('cancelled-run',3,'cancelled'),analysis_outcome:'failed'}; let view;
+  const controller=createSyncRunController({onChange:value=>view=value,api:{listenForSyncEvents:async()=>()=>{},getSyncRun:async()=>cancelled,reconcileLedgerSync:async()=>[{item_id:'known',filename:'safe.pdf',state:'succeeded',retry_safe:false,message:'confirmed',operation_id:'f'.repeat(64)}],getSyncReceipts:async()=>({receipts:[],error:'store_unavailable'})}})
+  await controller.connect(); assert.equal(controller.getState().run.status,'cancelled'); assert.equal(controller.getState().recovery[0].state,'succeeded'); assert.equal(controller.getState().receiptError,'store_unavailable'); assert.equal(view.receipts.length,0); controller.dispose()
 })

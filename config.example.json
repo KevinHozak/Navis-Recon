@@ -13,5 +13,6 @@
   "statement_archive_path": "C:/Example/Statements",
   "sync_inbox_path": "C:/Example/Statements/Inbox",
   "sync_counter_account": "Assets:Bank:Checking",
+  "sync_analysis_timeout_seconds": "600",
   "harvester_script": "C:/Example/finance_processor.py"
 }

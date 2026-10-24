@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { approveLedgerTransaction, getLedgerApprovalHistory, undoLedgerApproval, subscribeLedgerMutation, getLedgerSourceState, getLedgerSummary, getPendingLedger, startLedgerSync, commitLedgerSync, cancelSyncRun, getSyncOutcomes, reconcileLedgerSync, retryLedgerSync, registerSyncEventListeners } from './apiClient.js'
+import { approveLedgerTransaction, getLedgerApprovalHistory, undoLedgerApproval, subscribeLedgerMutation, getLedgerSourceState, getLedgerSummary, getPendingLedger, startLedgerSync, commitLedgerSync, cancelSyncRun, getSyncOutcomes, reconcileLedgerSync, retryLedgerSync, revealSyncSource, registerSyncEventListeners } from './apiClient.js'
 
 test('ledger API client preserves Tauri arguments and exact summary provenance at IPC boundary', async () => {
   const hadWindow = Object.hasOwn(globalThis, 'window')
@@ -126,6 +126,8 @@ test('sync IPC uses the native runId and payload argument mapping', async () => 
     ])
   } finally { if (hadWindow) globalThis.window = originalWindow; else delete globalThis.window }
 })
+
+test('source reveal maps only opaque references to native IPC', async()=>{ const had=Object.hasOwn(globalThis,'window'),old=globalThis.window,calls=[];try{globalThis.window={__TAURI_INTERNALS__:{invoke:async(command,args)=>{calls.push({command,args})}}};await revealSyncSource({sourceRef:`src:${'a'.repeat(64)}`,runId:'r',itemId:'i'});assert.deepEqual(calls,[{command:'reveal_sync_source',args:{sourceRef:`src:${'a'.repeat(64)}`,runId:'r',itemId:'i',operationId:null}}]);await assert.rejects(revealSyncSource({sourceRef:'C:\\secret'}),/invalid/)}finally{if(had)globalThis.window=old;else delete globalThis.window}})
 
 test('sync event registration cleans partial and late listeners, suppresses callbacks, and removes abort hooks', async () => {
   let removals = 0; let callback; let aborts = 0

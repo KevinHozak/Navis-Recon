@@ -8,14 +8,16 @@ import SubscriptionsWidget from './components/SubscriptionsWidget'
 import SyncWidget from './components/SyncWidget'
 import WealthDashboardWidget from './components/WealthDashboardWidget'
 import RecordsWidget from './components/RecordsWidget'
-import { ping, getPendingLedger, getRecurringObligations, getRecordsRadar, subscribeLedgerMutation } from './services/apiClient'
+import { ping, getPendingLedger, getRecurringObligations, getRecordsRadar, subscribeLedgerMutation, subscribeSyncResourceChanges } from './services/apiClient'
 import { createLatestRequestLoader } from './services/latestRequestLoader'
+import { createSyncResourceObserver } from './services/syncResourceObserver'
 import './index.css'
 
 function App() {
   const [currentView, setCurrentView] = useState('overview');
   const [pendingCount, setPendingCount] = useState(null);
   const [ledgerGeneration, setLedgerGeneration] = useState(0);
+  const [statementGeneration, setStatementGeneration] = useState(0);
   const [alertObligationsCount, setAlertObligationsCount] = useState(null);
   const [recordsActionCount, setRecordsActionCount] = useState(0);
   const [desktopStatus, setDesktopStatus] = useState('checking');
@@ -52,6 +54,14 @@ function App() {
     updateObligationAlerts();
     updateRecordsRadarCount();
     const unsubscribeLedgerMutation = subscribeLedgerMutation(() => { setLedgerGeneration((value) => value + 1); updatePendingCount(); updateObligationAlerts(); updateRecordsRadarCount(); });
+    const observer = createSyncResourceObserver({ subscribe: subscribeSyncResourceChanges, snapshot: async () => {
+      const { getSyncRun } = await import('./services/apiClient'); return getSyncRun()
+    }, onEffects: () => {
+      if (!isMounted) return;
+      setLedgerGeneration(value => value + 1); setStatementGeneration(value => value + 1);
+      updatePendingCount(); updateObligationAlerts(); updateRecordsRadarCount();
+    }, onError: error => console.error('Unable to observe completed imports:', error) });
+    observer.connect();
     // Refresh count every 10 seconds to keep sidebar accurate
     const interval = setInterval(() => {
       updatePendingCount();
@@ -60,6 +70,7 @@ function App() {
     }, 10000);
     return () => {
       isMounted = false;
+      observer.dispose();
       pendingLoader.dispose();
       obligationLoader.dispose();
       recordsLoader.dispose();
@@ -191,7 +202,7 @@ function App() {
 
           {currentView === 'statements' && (
             <div className="h-full">
-              <StatementLibraryWidget 
+              <StatementLibraryWidget key={statementGeneration}
                 initialFilter={statementFilter} 
                 onNavigateToChecklist={navigateToChecklist} 
               />
@@ -200,7 +211,7 @@ function App() {
 
           {currentView === 'checklist' && (
             <div className="bg-zinc-900/50 rounded-lg border border-white/5 shadow-2xl h-full">
-              <VaultChecklist 
+              <VaultChecklist key={statementGeneration}
                 onNavigateToStatements={navigateToStatements} 
               />
             </div>

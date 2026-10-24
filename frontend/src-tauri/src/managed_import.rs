@@ -47,7 +47,7 @@ pub struct ItemOutcome {
 
 #[derive(Clone)]
 pub(crate) struct ImportConfig {
-    inbox: PathBuf,
+    pub(crate) inbox: PathBuf,
     archive: PathBuf,
     ledger: PathBuf,
     store: PathBuf,
@@ -91,6 +91,11 @@ pub(crate) struct PreparedPlan {
     ledger_before_hash: String,
     entry: String,
 }
+impl PreparedPlan {
+    pub(crate) fn source_path(&self) -> &Path {
+        &self.source
+    }
+}
 
 pub(crate) fn runtime_config() -> Result<ImportConfig, String> {
     let inbox = canonical_root(config::get("sync_inbox_path"))?;
@@ -107,6 +112,19 @@ pub(crate) fn runtime_config() -> Result<ImportConfig, String> {
         config::get("ledger_currency").to_owned(),
         config::get("sync_counter_account").to_owned(),
     ))
+}
+
+pub(crate) fn bound_or_load_config<F>(
+    bound: Option<ImportConfig>,
+    load: F,
+) -> Result<ImportConfig, String>
+where
+    F: FnOnce() -> Result<ImportConfig, String>,
+{
+    match bound {
+        Some(cfg) => Ok(cfg),
+        None => load(),
+    }
 }
 
 pub(crate) fn prepare(
@@ -272,7 +290,7 @@ fn account_root_is(s: &str, roots: &[&str]) -> bool {
     token(s) && s.split(':').count() >= 2 && roots.contains(&s.split(':').next().unwrap_or(""))
 }
 #[cfg(windows)]
-fn reject_reparse_ancestry(path: &Path) -> Result<(), String> {
+pub(crate) fn reject_reparse_ancestry(path: &Path) -> Result<(), String> {
     use std::os::windows::fs::MetadataExt;
     for ancestor in path.ancestors() {
         if fs::symlink_metadata(ancestor).is_ok_and(|m| m.file_attributes() & 0x400 != 0) {
@@ -282,7 +300,7 @@ fn reject_reparse_ancestry(path: &Path) -> Result<(), String> {
     Ok(())
 }
 #[cfg(not(windows))]
-fn reject_reparse_ancestry(_: &Path) -> Result<(), String> {
+pub(crate) fn reject_reparse_ancestry(_: &Path) -> Result<(), String> {
     Ok(())
 }
 fn canonical_root(p: &str) -> Result<PathBuf, String> {
@@ -579,6 +597,41 @@ fn receipt_valid(r: &Receipt, filename: &str, cfg: &ImportConfig) -> bool {
         && r.run_id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+pub(crate) fn source_for_operation(
+    operation_id: &str,
+    cfg: &ImportConfig,
+) -> Result<PathBuf, String> {
+    if operation_id.len() != 64 || !operation_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("Durable source is unavailable".into());
+    }
+    let _journal_guard = journal_lock(&cfg.store).map_err(|_| "Durable source is unavailable")?;
+    let journal = cfg.store.join(format!("{operation_id}.json"));
+    let mut file = exclusive(&journal, false).map_err(|_| "Durable source is unavailable")?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|_| "Durable source is unavailable")?;
+    drop(file);
+    let receipt: Receipt =
+        serde_json::from_slice(&bytes).map_err(|_| "Durable source is unavailable")?;
+    if !receipt_valid(&receipt, &format!("{operation_id}.json"), cfg)
+        || receipt.identity != operation_id
+    {
+        return Err("Durable source is unavailable".into());
+    }
+    if !safe_name(&receipt.filename) {
+        return Err("Source file is unavailable".into());
+    }
+    let original_source = cfg.inbox.join(&receipt.filename);
+    reject_reparse_ancestry(&original_source)
+        .map_err(|_| "Source file is unavailable".to_string())?;
+    let source = fs::canonicalize(&original_source).map_err(|_| "Source file is unavailable")?;
+    if !within(&source, &cfg.inbox) || !source.is_file() {
+        return Err("Source file is unavailable".into());
+    }
+    reject_reparse_ancestry(&source).map_err(|_| "Source file is unavailable".to_string())?;
+    Ok(source)
 }
 
 fn exact_entry_present(ledger: &[u8], entry: &[u8]) -> bool {
@@ -1321,6 +1374,16 @@ fn commit_with_config(
     cfg: ImportConfig,
     faults: FaultPlan,
 ) -> Vec<ItemOutcome> {
+    commit_with_config_cancellable(items, run_id, cfg, faults, || false)
+}
+
+fn commit_with_config_cancellable(
+    items: Vec<serde_json::Value>,
+    run_id: &str,
+    cfg: ImportConfig,
+    faults: FaultPlan,
+    mut cancelled: impl FnMut() -> bool,
+) -> Vec<ItemOutcome> {
     let inbox = cfg.inbox;
     let archive = cfg.archive;
     let ledger = cfg.ledger;
@@ -1454,6 +1517,33 @@ fn commit_with_config(
             .get("_prepared_source_hash")
             .and_then(serde_json::Value::as_str)
             .map(|source_hash| identity(&ledger, source_hash));
+        if cancelled() {
+            let durable = persist_pre_effect_failure(
+                &item,
+                run_id,
+                &ImportConfig {
+                    inbox: inbox.clone(),
+                    archive: archive.clone(),
+                    ledger: ledger.clone(),
+                    store: store.clone(),
+                    currency: currency.clone(),
+                    counter: counter.clone(),
+                },
+                &id,
+                &filename,
+                "Import cancelled before this item started",
+            );
+            out.push(durable.unwrap_or(ItemOutcome {
+                item_id: id,
+                filename,
+                state: "uncertain".into(),
+                retry_safe: false,
+                message:
+                    "Import cancelled before this item started; durable outcome unavailable".into(),
+                operation_id,
+            }));
+            continue;
+        }
         if let Some(message) = preflight[index].as_ref() {
             let prepared = item.get("_prepared_source_hash").is_some();
             let durable = if prepared {
@@ -1868,6 +1958,15 @@ pub(crate) fn commit_prepared(
     run_id: &str,
     cfg: ImportConfig,
 ) -> Vec<ItemOutcome> {
+    commit_prepared_cancellable(plans, run_id, cfg, || false)
+}
+
+pub(crate) fn commit_prepared_cancellable(
+    plans: Vec<(String, PreparedPlan)>,
+    run_id: &str,
+    cfg: ImportConfig,
+    cancelled: impl FnMut() -> bool,
+) -> Vec<ItemOutcome> {
     let current_ledger = fs::read(&cfg.ledger).ok();
     let mut items = Vec::with_capacity(plans.len());
     for (id, plan) in plans {
@@ -1886,7 +1985,7 @@ pub(crate) fn commit_prepared(
         item["_prepared_ledger_backup"] = serde_json::json!(plan.ledger_before);
         items.push(item);
     }
-    commit_with_config(items, run_id, cfg, FaultPlan::default())
+    commit_with_config_cancellable(items, run_id, cfg, FaultPlan::default(), cancelled)
 }
 
 #[cfg(test)]
@@ -1944,6 +2043,170 @@ mod tests {
         );
         let item = serde_json::json!({"_managed_item_id":"stable-item","date":"2026-10-23","filename":"source.pdf","new_name":"Bank 2026-10-23.pdf","rule":"Groceries","category":"Expenses:Food","amount":"12.34","was_encrypted":false,"is_cleared":true});
         (dir, config, item)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn durable_config_loads_only_when_no_run_config_is_bound() {
+        let (_dir, cfg, _) = fixture();
+        let calls = std::cell::Cell::new(0);
+        let bound = bound_or_load_config(Some(cfg.clone()), || {
+            calls.set(calls.get() + 1);
+            Err("loader should not run".into())
+        })
+        .unwrap();
+        assert_eq!(bound.test_ledger(), cfg.test_ledger());
+        assert_eq!(calls.get(), 0);
+
+        let loaded = bound_or_load_config(None, || {
+            calls.set(calls.get() + 1);
+            Ok(cfg.clone())
+        })
+        .unwrap();
+        assert_eq!(loaded.test_ledger(), cfg.test_ledger());
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn durable_source_requires_valid_receipt_and_existing_regular_inbox_source() {
+        let (dir, cfg, item) = fixture();
+        let outcomes =
+            commit_with_config(vec![item], "show-source", cfg.clone(), FaultPlan::default());
+        assert_eq!(outcomes[0].state, "succeeded", "{outcomes:?}");
+        let operation_id = identity(&cfg.ledger, &hash(b"synthetic statement bytes"));
+        let resolved = source_for_operation(&operation_id, &cfg).unwrap();
+        assert_eq!(
+            resolved,
+            fs::canonicalize(dir.join("inbox/source.pdf")).unwrap()
+        );
+
+        for bad_id in ["unknown-operation", &"f".repeat(64)] {
+            assert!(source_for_operation(bad_id, &cfg).is_err());
+        }
+        let foreign_ledger = dir.join("foreign.beancount");
+        fs::write(&foreign_ledger, b"; foreign synthetic ledger\n").unwrap();
+        let foreign_cfg = ImportConfig::injected(
+            cfg.inbox.clone(),
+            cfg.archive.clone(),
+            foreign_ledger,
+            cfg.store.clone(),
+            cfg.currency.clone(),
+            cfg.counter.clone(),
+        );
+        assert!(source_for_operation(&operation_id, &foreign_cfg).is_err());
+
+        let receipt_path = cfg.store.join(format!("{operation_id}.json"));
+        let original = fs::read(&receipt_path).unwrap();
+        let mut receipt: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        receipt["filename"] = serde_json::json!("../escape.pdf");
+        fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert!(source_for_operation(&operation_id, &cfg).is_err());
+
+        fs::write(&receipt_path, &original).unwrap();
+        receipt = serde_json::from_slice(&original).unwrap();
+        receipt["destination"] = serde_json::json!(dir
+            .join("archive/../outside.pdf")
+            .to_string_lossy()
+            .to_string());
+        fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert!(source_for_operation(&operation_id, &cfg).is_err());
+
+        fs::write(&receipt_path, &original).unwrap();
+        fs::remove_file(dir.join("inbox/source.pdf")).unwrap();
+        assert!(source_for_operation(&operation_id, &cfg).is_err());
+        let outside = dir.join("outside.pdf");
+        fs::write(&outside, b"outside synthetic source").unwrap();
+        let source_link = dir.join("inbox/source.pdf");
+        match std::os::windows::fs::symlink_file(&outside, &source_link) {
+            Ok(()) => {
+                assert!(source_for_operation(&operation_id, &cfg).is_err());
+            }
+            Err(error) => {
+                println!("SKIP source symlink escape: Windows rejected symlink creation ({error})")
+            }
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn durable_source_resolves_failed_receipt_without_running_analysis() {
+        let (_dir, cfg, item) = fixture();
+        let outcomes = commit_with_config(
+            vec![item],
+            "show-source-failed",
+            cfg.clone(),
+            FaultPlan {
+                before_journal: true,
+                ..FaultPlan::default()
+            },
+        );
+        assert_eq!(outcomes[0].state, "failed", "{outcomes:?}");
+        let operation_id = identity(&cfg.ledger, &hash(b"synthetic statement bytes"));
+        assert!(source_for_operation(&operation_id, &cfg).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancellation_before_first_item_has_no_effect_and_remains_retry_safe() {
+        let (_dir, cfg, item) = fixture();
+        let plan = prepare(&item, &cfg).unwrap();
+        let before = fs::read(&cfg.ledger).unwrap();
+        let outcomes = commit_prepared_cancellable(
+            vec![("cancel-before".into(), plan)],
+            "run-cancel-before",
+            cfg.clone(),
+            || true,
+        );
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].state, "failed");
+        assert!(outcomes[0].retry_safe);
+        assert_eq!(fs::read(&cfg.ledger).unwrap(), before);
+        assert!(!cfg
+            .archive
+            .join("Statements 2026/Bank 2026-10-23.pdf")
+            .exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancellation_after_confirmed_item_preserves_first_success_and_skips_later_item() {
+        let (dir, cfg, item) = fixture();
+        fs::write(
+            cfg.inbox.join("source-two.pdf"),
+            b"second synthetic statement",
+        )
+        .unwrap();
+        let mut second = item.clone();
+        second["filename"] = serde_json::json!("source-two.pdf");
+        second["new_name"] = serde_json::json!("Bank 2026-10-24.pdf");
+        second["date"] = serde_json::json!("2026-10-24");
+        let first_plan = prepare(&item, &cfg).unwrap();
+        let second_plan = prepare(&second, &cfg).unwrap();
+        let checks = std::sync::atomic::AtomicU64::new(0);
+        let outcomes = commit_prepared_cancellable(
+            vec![("first".into(), first_plan), ("second".into(), second_plan)],
+            "run-cancel-after",
+            cfg.clone(),
+            || checks.fetch_add(1, Ordering::SeqCst) > 0,
+        );
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].state, "succeeded");
+        assert_eq!(outcomes[1].state, "failed");
+        assert!(!outcomes[1].retry_safe, "later item shares the batch's pre-write ledger image and is never advertised retry-safe without reconciliation");
+        let ledger = fs::read_to_string(&cfg.ledger).unwrap();
+        assert!(ledger.contains("Bank 2026-10-23.pdf"));
+        assert!(!ledger.contains("Bank 2026-10-24.pdf"));
+        assert!(cfg
+            .archive
+            .join("Statements 2026/Bank 2026-10-23.pdf")
+            .exists());
+        assert!(!cfg
+            .archive
+            .join("Statements 2026/Bank 2026-10-24.pdf")
+            .exists());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[cfg(windows)]

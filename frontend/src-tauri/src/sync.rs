@@ -3,10 +3,10 @@ use serde_json::{json, Value};
 use sha2::Digest;
 #[cfg(test)]
 use std::io::Write;
+#[cfg(test)]
+use std::process::{Command, Stdio};
 use std::{
-    collections::HashMap,
-    io::{BufRead, BufReader},
-    process::{Command, Stdio},
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex, OnceLock},
 };
 use tauri::{AppHandle, Emitter};
@@ -37,6 +37,8 @@ pub struct SyncRun {
     revision: u64,
     sequence: u64,
     status: Phase,
+    #[serde(default)]
+    cancelling: bool,
     analysis_outcome: Option<AnalysisOutcome>,
     logs: Vec<Value>,
     matches: Vec<Value>,
@@ -48,6 +50,14 @@ pub struct SyncRun {
     managed_outcomes: Vec<crate::managed_import::ItemOutcome>,
     #[serde(default)]
     operation_kind: Option<String>,
+    #[serde(default)]
+    started_at_ms: Option<u64>,
+    #[serde(default)]
+    elapsed_ms: Option<u64>,
+    #[serde(default)]
+    receipt_id: Option<String>,
+    #[serde(default)]
+    receipt_error: Option<String>,
 }
 
 impl Default for SyncRun {
@@ -57,6 +67,7 @@ impl Default for SyncRun {
             revision: 0,
             sequence: 0,
             status: Phase::Idle,
+            cancelling: false,
             analysis_outcome: None,
             logs: vec![],
             matches: vec![],
@@ -66,6 +77,10 @@ impl Default for SyncRun {
             result: None,
             managed_outcomes: vec![],
             operation_kind: None,
+            started_at_ms: None,
+            elapsed_ms: None,
+            receipt_id: None,
+            receipt_error: None,
         }
     }
 }
@@ -76,9 +91,20 @@ struct Coordinator {
     next_id: Mutex<u64>,
     plans: Mutex<HashMap<String, crate::managed_import::PreparedPlan>>,
     import_config: Mutex<Option<crate::managed_import::ImportConfig>>,
+    cancel_requested: Mutex<Option<String>>,
+    receipt_store: Mutex<Option<Arc<dyn crate::sync_receipts::ReceiptStore>>>,
+    phase_started: Mutex<HashMap<String, std::time::Instant>>,
+    finalizing: Mutex<HashSet<String>>,
 }
 
 impl Coordinator {
+    fn configure_receipts(&self) {
+        if let Ok(mut slot) = self.receipt_store.lock() {
+            *slot = crate::sync_receipts::FileStore::production()
+                .ok()
+                .map(|s| Arc::new(s) as Arc<dyn crate::sync_receipts::ReceiptStore>);
+        }
+    }
     fn snapshot(&self) -> SyncRun {
         self.current.lock().unwrap().clone()
     }
@@ -116,8 +142,15 @@ impl Coordinator {
             revision,
             sequence: 0,
             status: Phase::Analyzing,
+            started_at_ms: Some(crate::sync_receipts::now_ms()),
             ..SyncRun::default()
         };
+        if let Some(id) = run.run_id.as_ref() {
+            self.phase_started
+                .lock()
+                .unwrap()
+                .insert(id.clone(), std::time::Instant::now());
+        }
         *config = Some(cfg);
         plans.clear();
         Ok(run.clone())
@@ -150,8 +183,15 @@ impl Coordinator {
             status: Phase::Committing,
             analysis_outcome: Some(AnalysisOutcome::Success),
             operation_kind: Some("managed_retry".into()),
+            started_at_ms: Some(crate::sync_receipts::now_ms()),
             ..SyncRun::default()
         };
+        if let Some(id) = run.run_id.as_ref() {
+            self.phase_started
+                .lock()
+                .unwrap()
+                .insert(id.clone(), std::time::Instant::now());
+        }
         Ok(run.clone())
     }
     fn reserve(&self, phase: Phase) -> Result<SyncRun, String> {
@@ -173,8 +213,15 @@ impl Coordinator {
             revision: run.revision + 1,
             sequence: 0,
             status: phase,
+            started_at_ms: Some(crate::sync_receipts::now_ms()),
             ..SyncRun::default()
         };
+        if let Some(id) = run.run_id.as_ref() {
+            self.phase_started
+                .lock()
+                .unwrap()
+                .insert(id.clone(), std::time::Instant::now());
+        }
         Ok(run.clone())
     }
     #[cfg(test)]
@@ -233,12 +280,26 @@ impl Coordinator {
                         .push(json!({"filename":data["filename"], "message":message})),
                 }
             }
+            attach_source_ref(&mut data, id);
         }
         match event {
-            "log" => run.logs.push(data.clone()),
+            "log" => {
+                run.logs.push(data.clone());
+                if run.logs.len() > crate::sync_process::MAX_RETAINED_LOGS {
+                    run.logs.remove(0);
+                }
+            }
             "match" => run.matches.push(data.clone()),
-            "unmatched" => run.unmatched.push(sanitize_diagnostic(data.clone())),
-            "error" => run.errors.push(sanitize_diagnostic(data.clone())),
+            "unmatched" => {
+                let mut item = sanitize_diagnostic(data.clone());
+                attach_source_ref(&mut item, id);
+                run.unmatched.push(item)
+            }
+            "error" => {
+                let mut item = sanitize_diagnostic(data.clone());
+                attach_source_ref(&mut item, id);
+                run.errors.push(item)
+            }
             _ => {}
         }
         refresh_eligible(&mut run);
@@ -294,11 +355,19 @@ impl Coordinator {
                 .as_object_mut()
                 .ok_or("Malformed stored match")?
                 .remove("match_id");
+            resolved.as_object_mut().unwrap().remove("source_ref");
             resolved["_managed_item_id"] = json!(match_id);
             selected.push(resolved);
             selected_ids.push(match_id.clone());
         }
         run.status = Phase::Committing;
+        run.started_at_ms = Some(crate::sync_receipts::now_ms());
+        run.elapsed_ms = None;
+        run.receipt_id = None;
+        run.receipt_error = None;
+        if let Ok(mut timers) = self.phase_started.lock() {
+            timers.insert(id.to_owned(), std::time::Instant::now());
+        }
         run.sequence += 1;
         run.revision += 1;
         Ok((run.clone(), selected))
@@ -360,6 +429,13 @@ impl Coordinator {
             }
         }
         run.status = Phase::Committing;
+        run.started_at_ms = Some(crate::sync_receipts::now_ms());
+        run.elapsed_ms = None;
+        run.receipt_id = None;
+        run.receipt_error = None;
+        if let Ok(mut timers) = self.phase_started.lock() {
+            timers.insert(id.to_owned(), std::time::Instant::now());
+        }
         run.sequence += 1;
         run.revision += 1;
         Ok((run.clone(), selected, cfg))
@@ -391,6 +467,166 @@ impl Coordinator {
         run.revision += 1;
         Ok(run.clone())
     }
+    fn request_cancel(&self, id: &str) -> Result<SyncRun, String> {
+        let mut run = self
+            .current
+            .lock()
+            .map_err(|_| "Sync coordinator unavailable")?;
+        if run.run_id.as_deref() != Some(id) {
+            return Err("Sync run is no longer current".into());
+        }
+        if run.status == Phase::Review {
+            run.status = Phase::Cancelled;
+        } else if matches!(run.status, Phase::Analyzing | Phase::Committing) {
+            let mut requested = self
+                .cancel_requested
+                .lock()
+                .map_err(|_| "Sync coordinator unavailable")?;
+            if requested.as_deref() != Some(id) {
+                *requested = Some(id.to_owned());
+                run.cancelling = true;
+                run.sequence += 1;
+                run.revision += 1;
+            }
+        } else if run.status != Phase::Cancelled {
+            return Err("This sync run cannot be cancelled".into());
+        }
+        Ok(run.clone())
+    }
+    fn is_cancelled(&self, id: &str) -> bool {
+        self.cancel_requested
+            .lock()
+            .is_ok_and(|requested| requested.as_deref() == Some(id))
+    }
+}
+
+fn attach_source_ref(item: &mut Value, run_id: &str) {
+    if let Some(filename) = item
+        .get("filename")
+        .and_then(Value::as_str)
+        .filter(|n| crate::managed_import::safe_name(n))
+    {
+        item["source_ref"] = json!(source_ref(run_id, filename));
+    }
+}
+
+#[tauri::command]
+pub fn reveal_sync_source(
+    source_ref: String,
+    run_id: Option<String>,
+    item_id: Option<String>,
+    operation_id: Option<String>,
+) -> Result<(), String> {
+    let c = coordinator();
+    if let Some(operation_id) = operation_id {
+        if run_id.is_some() || item_id.is_some() {
+            return Err("Durable source is unavailable".into());
+        }
+        if source_ref != format!("src:{}", operation_id.to_lowercase()) {
+            return Err("Durable source is unavailable".into());
+        }
+        let bound = c
+            .import_config
+            .lock()
+            .map_err(|_| "Managed configuration unavailable")?
+            .clone();
+        let cfg = crate::managed_import::bound_or_load_config(
+            bound,
+            crate::managed_import::runtime_config,
+        )?;
+        let path = crate::managed_import::source_for_operation(&operation_id, &cfg)?;
+        return reveal_path(path);
+    }
+    let run = c
+        .current
+        .lock()
+        .map_err(|_| "Sync coordinator unavailable")?;
+    if run_id.as_deref() != run.run_id.as_deref() {
+        return Err("Source is no longer available".into());
+    }
+    let filename = if let Some(item_id) = item_id.as_deref() {
+        run.matches
+            .iter()
+            .find(|m| {
+                m["match_id"] == item_id
+                    && item_id.starts_with(&format!("{}:", run_id.as_deref().unwrap_or("")))
+            })
+            .and_then(|m| m["filename"].as_str())
+    } else {
+        run.unmatched
+            .iter()
+            .chain(run.errors.iter())
+            .find(|m| m["source_ref"] == source_ref)
+            .and_then(|m| m["filename"].as_str())
+    }
+    .ok_or("Source is no longer available")?
+    .to_owned();
+    if source_ref != source_ref_fn(run_id.as_deref().unwrap_or(""), &filename)
+        || operation_id.is_some()
+    {
+        return Err("Source is no longer available".into());
+    }
+    drop(run);
+    let cfg = c
+        .import_config
+        .lock()
+        .map_err(|_| "Managed configuration unavailable")?
+        .clone()
+        .ok_or("Managed configuration unavailable")?;
+    if !crate::managed_import::safe_name(&filename) {
+        return Err("Source file is unavailable".into());
+    }
+    let original_path = cfg.inbox.join(&filename);
+    crate::managed_import::reject_reparse_ancestry(&original_path)
+        .map_err(|_| "Source file is unavailable".to_string())?;
+    let path = std::fs::canonicalize(&original_path).map_err(|_| "Source file is unavailable")?;
+    if !path.starts_with(&cfg.inbox) || !path.is_file() {
+        return Err("Source file is unavailable".into());
+    }
+    if let Some(item_id) = item_id.as_deref() {
+        let plans = c.plans.lock().map_err(|_| "Managed plans unavailable")?;
+        let plan = plans.get(item_id).ok_or("Source is no longer available")?;
+        let approved =
+            std::fs::canonicalize(plan.source_path()).map_err(|_| "Source file is unavailable")?;
+        if approved != path {
+            return Err("Source is no longer available".into());
+        }
+    }
+    #[cfg(windows)]
+    crate::managed_import::reject_reparse_ancestry(&path)
+        .map_err(|_| "Source file is unavailable".to_string())?;
+    reveal_path(path)
+}
+
+fn reveal_path(path: std::path::PathBuf) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        reveal_path_with(path, |canonical| {
+            std::process::Command::new("explorer.exe")
+                .arg(format!("/select,{}", canonical.display()))
+                .creation_flags(0x08000000)
+                .spawn()
+                .map(|_| ())
+                .map_err(|_| "Unable to open source location".to_string())
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err("Source reveal is supported only on Windows".into())
+    }
+}
+
+fn reveal_path_with<F>(canonical: std::path::PathBuf, opener: F) -> Result<(), String>
+where
+    F: FnOnce(std::path::PathBuf) -> Result<(), String>,
+{
+    opener(canonical)
+}
+
+fn source_ref_fn(run_id: &str, filename: &str) -> String {
+    source_ref(run_id, filename)
 }
 
 fn strip_worker_identity(value: &mut Value) {
@@ -399,7 +635,17 @@ fn strip_worker_identity(value: &mut Value) {
         object.remove("revision");
         object.remove("sequence");
         object.remove("match_id");
+        object.remove("source_ref");
     }
+}
+
+fn source_ref(run_id: &str, filename: &str) -> String {
+    format!(
+        "src:{}",
+        hex(&sha2::Sha256::digest(
+            format!("{run_id}\0{filename}").as_bytes()
+        ))
+    )
 }
 
 fn valid_match(value: &Value) -> bool {
@@ -514,11 +760,193 @@ fn terminal(
     status: Phase,
     payload: Value,
 ) {
+    let phase_key = format!("{id}:{expected:?}");
+    {
+        let run = c.current.lock().unwrap();
+        if run.run_id.as_deref() != Some(id) || run.status != expected {
+            return;
+        }
+        let mut finalizing = c.finalizing.lock().unwrap();
+        if !finalizing.insert(phase_key.clone()) {
+            return;
+        }
+    }
+    // Build and publish the immutable redacted record without holding the
+    // coordinator lock. Worker identity and every untrusted source identifier
+    // are hashed before serialization.
+    let (receipt_id, receipt_error, elapsed) = {
+        let snapshot = c.snapshot();
+        let operation_kind = if matches!(expected, Phase::Analyzing | Phase::Review) {
+            "analysis"
+        } else if snapshot.operation_kind.as_deref() == Some("managed_retry") {
+            "retry"
+        } else {
+            "commit"
+        };
+        let elapsed = c
+            .phase_started
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|t| t.elapsed().as_millis().min(u64::MAX as u128) as u64)
+            .unwrap_or(0);
+        let started = snapshot
+            .started_at_ms
+            .unwrap_or_else(crate::sync_receipts::now_ms);
+        let ended = crate::sync_receipts::now_ms().max(started);
+        let terminal_state = match status {
+            Phase::Review => "review",
+            Phase::Complete => "complete",
+            Phase::Failed => "failed",
+            Phase::Cancelled => "cancelled",
+            _ => "failed",
+        };
+        let mut items = Vec::new();
+        for (i, item) in snapshot.matches.iter().enumerate() {
+            items.push(crate::sync_receipts::ReceiptItem {
+                item_id: crate::sync_receipts::opaque_id(&format!(
+                    "{id}:match:{i}:{}",
+                    item.get("match_id").and_then(Value::as_str).unwrap_or("")
+                )),
+                operation_id: None,
+                state: "matched".into(),
+                retry_safe: false,
+            });
+        }
+        for (group, rows, state) in [
+            ("unmatched", &snapshot.unmatched, "unmatched"),
+            ("error", &snapshot.errors, "error"),
+        ] {
+            for (i, item) in rows.iter().enumerate() {
+                items.push(crate::sync_receipts::ReceiptItem {
+                    item_id: crate::sync_receipts::opaque_id(&format!(
+                        "{id}:{group}:{i}:{}",
+                        item.get("filename").and_then(Value::as_str).unwrap_or("")
+                    )),
+                    operation_id: None,
+                    state: state.into(),
+                    retry_safe: false,
+                });
+            }
+        }
+        for (i, item) in snapshot.managed_outcomes.iter().enumerate() {
+            let state = match item.state.as_str() {
+                "succeeded" => "succeeded",
+                "uncertain" => "uncertain",
+                _ => "failed",
+            };
+            items.push(crate::sync_receipts::ReceiptItem {
+                item_id: crate::sync_receipts::opaque_id(&format!(
+                    "{id}:operation:{i}:{}",
+                    item.item_id
+                )),
+                operation_id: item
+                    .operation_id
+                    .as_deref()
+                    .map(crate::sync_receipts::opaque_id),
+                state: state.into(),
+                retry_safe: item.retry_safe,
+            });
+        }
+        let count = |state: &str| {
+            items
+                .iter()
+                .filter(|v| v.state == state)
+                .count()
+                .min(u32::MAX as usize) as u32
+        };
+        let counts = crate::sync_receipts::Counts {
+            matched: count("matched"),
+            unmatched: count("unmatched"),
+            error: count("error"),
+            succeeded: count("succeeded"),
+            failed: count("failed"),
+            uncertain: count("uncertain"),
+        };
+        let items_truncated = items.len() > 1000;
+        if items_truncated {
+            items.truncate(1000);
+        }
+        let mut diagnostics = Vec::new();
+        for code in [
+            "timeout",
+            "cancelled",
+            "spawn_failed",
+            "output_limit",
+            "protocol_error",
+            "runner_failed",
+            "process_termination_uncertain",
+        ] {
+            if payload.get("diagnostic_code").and_then(Value::as_str) == Some(code)
+                || snapshot
+                    .errors
+                    .iter()
+                    .any(|e| e.get("diagnostic_code").and_then(Value::as_str) == Some(code))
+            {
+                diagnostics.push(code.to_owned());
+            }
+        }
+        if status == Phase::Cancelled && !diagnostics.iter().any(|v| v == "cancelled") {
+            diagnostics.push("cancelled".into());
+        }
+        if snapshot
+            .managed_outcomes
+            .iter()
+            .any(|item| item.state == "failed")
+        {
+            diagnostics.push("item_failed".into());
+        }
+        if snapshot
+            .managed_outcomes
+            .iter()
+            .any(|item| item.state == "uncertain")
+        {
+            diagnostics.push("item_uncertain".into());
+        }
+        let receipt_id = crate::sync_receipts::opaque_id(&format!(
+            "{id}:{expected:?}:{}:{}",
+            snapshot.sequence, operation_kind
+        ));
+        let receipt = crate::sync_receipts::RunReceipt {
+            version: 1,
+            receipt_id: receipt_id.clone(),
+            run_id: crate::sync_receipts::opaque_id(id),
+            operation_kind: operation_kind.into(),
+            started_at_ms: started,
+            ended_at_ms: ended,
+            duration_ms: elapsed,
+            terminal_state: terminal_state.into(),
+            timed_out: diagnostics.iter().any(|v| v == "timeout"),
+            counts,
+            items,
+            items_truncated,
+            diagnostic_codes: diagnostics,
+        };
+        let store = c.receipt_store.lock().unwrap().clone();
+        let error = match store {
+            Some(store) => store.write(&receipt).err().map(str::to_owned),
+            None => Some("store_unavailable".into()),
+        };
+        (
+            if error.is_none() {
+                Some(receipt_id)
+            } else {
+                None
+            },
+            error,
+            elapsed,
+        )
+    };
     let mut run = c.current.lock().unwrap();
     if run.run_id.as_deref() != Some(id) || run.status != expected {
+        c.finalizing.lock().unwrap().remove(&phase_key);
         return;
     }
     run.status = status.clone();
+    run.cancelling = false;
+    run.elapsed_ms = Some(elapsed);
+    run.receipt_id = receipt_id;
+    run.receipt_error = receipt_error;
     if expected == Phase::Analyzing {
         run.analysis_outcome = Some(if status == Phase::Failed {
             AnalysisOutcome::Failed
@@ -546,6 +974,12 @@ fn terminal(
     run.result = envelope.get("payload").cloned();
     envelope["snapshot"] = serde_json::to_value(&*run).unwrap_or_else(|_| json!({}));
     drop(run);
+    c.finalizing.lock().unwrap().remove(&phase_key);
+    if let Ok(mut requested) = c.cancel_requested.lock() {
+        if requested.as_deref() == Some(id) {
+            *requested = None;
+        }
+    }
     sink.emit("sync:done", envelope);
 }
 
@@ -603,20 +1037,17 @@ fn analyze_worker(
     args: &[String],
 ) {
     let c = coordinator.as_ref();
-    let spawn = Command::new(program)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let mut child = match spawn {
-        Ok(child) => child,
-        Err(e) => {
+    let timeout = match crate::sync_process::timeout_seconds(crate::config::get(
+        "sync_analysis_timeout_seconds",
+    )) {
+        Ok(seconds) => std::time::Duration::from_secs(seconds),
+        Err(error) => {
             publish(
                 c,
                 sink,
                 id,
                 "error",
-                json!({"message": format!("Unable to start harvester: {e}")}),
+                json!({"message":error,"diagnostic_code":"invalid_timeout"}),
             );
             terminal(
                 c,
@@ -629,123 +1060,148 @@ fn analyze_worker(
             return;
         }
     };
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let c_err = coordinator.clone();
-    let stderr_thread = stderr.map(|stream| {
-        let id = id.to_owned();
-        let sink = sink.duplicate();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stream).lines() {
-                match line {
-                    Ok(line) => publish(&c_err, sink.as_ref(), &id, "log", json!({"message": line, "level":"warning", "source":"stderr"})),
-                    Err(error) => publish(&c_err, sink.as_ref(), &id, "error", json!({"message":format!("Unable to read analyzer stderr: {error}"), "protocol_error":true})),
-                }
-            }
-        })
-    });
     let mut fatal = false;
-    if let Some(stdout) = stdout {
-        for line in BufReader::new(stdout).lines() {
-            match line {
-                Ok(line) => fatal |= parse_line(c, sink, id, &line),
-                Err(error) => {
-                    fatal = true;
-                    publish(
-                        c,
-                        sink,
-                        id,
-                        "error",
-                        json!({"message":format!("Unable to read analyzer output: {error}"), "protocol_error":true}),
-                    );
-                }
+    let report = crate::sync_process::run(
+        program,
+        args,
+        timeout,
+        || c.is_cancelled(id),
+        |is_stderr, line| {
+            if is_stderr {
+                publish(
+                    c,
+                    sink,
+                    id,
+                    "log",
+                    json!({"message":line,"level":"warning","source":"stderr"}),
+                );
+            } else {
+                fatal |= parse_line(c, sink, id, line);
+            }
+        },
+    );
+    if !report.ended {
+        let message = report
+            .error
+            .unwrap_or_else(|| "Analyzer termination could not be confirmed".into());
+        if let Ok(mut run) = c.current.lock() {
+            if run.run_id.as_deref() == Some(id) {
+                run.cancelling = true;
+                run.errors.push(
+                    json!({"message":message,"diagnostic_code":"process_termination_uncertain"}),
+                );
+                run.sequence += 1;
+                run.revision += 1;
             }
         }
+        return;
     }
-    let status = child.wait();
-    if let Some(thread) = stderr_thread {
-        let _ = thread.join();
+    if report.cancelled {
+        terminal(
+            c,
+            sink,
+            id,
+            Phase::Analyzing,
+            Phase::Cancelled,
+            json!({"status":"cancelled","analysis_outcome":"failed","diagnostic_code":"cancelled"}),
+        );
+        return;
     }
-    match status {
-        Ok(status) if status.success() && !fatal => {
-            let snapshot = c.snapshot();
-            let global_error = snapshot.errors.iter().any(|e| {
-                e.get("protocol_error").and_then(Value::as_bool) == Some(true)
-                    || e.get("filename")
-                        .and_then(Value::as_str)
-                        .is_none_or(|f| f.trim().is_empty())
-            }) || snapshot.unmatched.iter().any(|item| {
-                item.get("filename")
-                    .and_then(Value::as_str)
-                    .is_none_or(|f| f.trim().is_empty())
-            });
-            let diagnostics = !snapshot.errors.is_empty() || !snapshot.unmatched.is_empty();
-            let outcome = if global_error || (diagnostics && snapshot.eligible_match_ids.is_empty())
-            {
-                "failed"
-            } else if diagnostics {
-                "partial"
+    if report.timed_out || report.output_limited || report.error.is_some() {
+        let error_detail = report.error.clone();
+        let message = report.error.unwrap_or_else(|| {
+            if report.timed_out {
+                "Analyzer exceeded its configured time limit".into()
             } else {
-                "success"
-            };
-            terminal(
-                c,
-                sink,
-                id,
-                Phase::Analyzing,
-                if outcome == "failed" {
-                    Phase::Failed
-                } else {
-                    Phase::Review
-                },
-                json!({"status":outcome,"analysis_outcome":outcome}),
-            );
-        }
-        Ok(status) if status.success() => terminal(
+                "Analyzer output exceeded its configured limit".into()
+            }
+        });
+        let diagnostic_code = if report.timed_out {
+            "timeout"
+        } else if report.output_limited {
+            "output_limit"
+        } else if error_detail
+            .as_deref()
+            .is_some_and(|message| message.contains("invalid UTF-8"))
+        {
+            "protocol_error"
+        } else if error_detail
+            .as_deref()
+            .is_some_and(|message| message.contains("CreateProcessW"))
+        {
+            "spawn_failed"
+        } else {
+            "runner_failed"
+        };
+        publish(
+            c,
+            sink,
+            id,
+            "error",
+            json!({"message":message,"diagnostic_code":diagnostic_code,"protocol_error":true}),
+        );
+        terminal(
             c,
             sink,
             id,
             Phase::Analyzing,
             Phase::Failed,
             json!({"status":"error","analysis_outcome":"failed"}),
-        ),
-        Ok(status) => {
-            publish(
-                c,
-                sink,
-                id,
-                "error",
-                json!({"message": format!("Harvester exited with status {status}")}),
-            );
-            terminal(
-                c,
-                sink,
-                id,
-                Phase::Analyzing,
-                Phase::Failed,
-                json!({"status":"error"}),
-            );
-        }
-        Err(e) => {
-            publish(
-                c,
-                sink,
-                id,
-                "error",
-                json!({"message": format!("Unable to finish harvester: {e}")}),
-            );
-            terminal(
-                c,
-                sink,
-                id,
-                Phase::Analyzing,
-                Phase::Failed,
-                json!({"status":"error"}),
-            );
-        }
+        );
+        return;
     }
+    if report.exit_code != Some(0) || fatal {
+        if !fatal {
+            publish(
+                c,
+                sink,
+                id,
+                "error",
+                json!({"message":format!("Harvester exited with code {:?}", report.exit_code)}),
+            );
+        }
+        terminal(
+            c,
+            sink,
+            id,
+            Phase::Analyzing,
+            Phase::Failed,
+            json!({"status":"error","analysis_outcome":"failed"}),
+        );
+        return;
+    }
+    let snapshot = c.snapshot();
+    let global_error = snapshot.errors.iter().any(|e| {
+        e.get("protocol_error").and_then(Value::as_bool) == Some(true)
+            || e.get("filename")
+                .and_then(Value::as_str)
+                .is_none_or(|f| f.trim().is_empty())
+    }) || snapshot.unmatched.iter().any(|item| {
+        item.get("filename")
+            .and_then(Value::as_str)
+            .is_none_or(|f| f.trim().is_empty())
+    });
+    let diagnostics = !snapshot.errors.is_empty() || !snapshot.unmatched.is_empty();
+    let outcome = if global_error || (diagnostics && snapshot.eligible_match_ids.is_empty()) {
+        "failed"
+    } else if diagnostics {
+        "partial"
+    } else {
+        "success"
+    };
+    terminal(
+        c,
+        sink,
+        id,
+        Phase::Analyzing,
+        if outcome == "failed" {
+            Phase::Failed
+        } else {
+            Phase::Review
+        },
+        json!({"status":outcome,"analysis_outcome":outcome}),
+    );
 }
-
 #[cfg(test)]
 fn commit_worker(
     coordinator: Arc<Coordinator>,
@@ -920,6 +1376,11 @@ pub fn get_sync_run() -> SyncRun {
 }
 
 #[tauri::command]
+pub fn get_sync_receipts() -> crate::sync_receipts::ReceiptList {
+    crate::sync_receipts::list_production()
+}
+
+#[tauri::command]
 pub fn get_sync_outcomes() -> Vec<crate::managed_import::ItemOutcome> {
     crate::managed_import::outcomes(crate::config::get("ledger_path"))
 }
@@ -949,12 +1410,14 @@ pub fn retry_ledger_sync(app: AppHandle, operation_ids: Vec<String>) -> Result<S
         return Err("Retry selection contains an invalid operation ID".into());
     }
     let c = coordinator();
+    c.configure_receipts();
     let run = c.reserve_retry()?;
     let id = run.run_id.clone().unwrap();
     let expected_count = operation_ids.len();
     publish_state(&app, &run);
     tauri::async_runtime::spawn_blocking(move || {
         let outcomes = crate::managed_import::retry_operations(operation_ids);
+        let confirmed = outcomes.iter().any(|item| item.state == "succeeded");
         let success = outcomes.len() == expected_count
             && !outcomes.is_empty()
             && outcomes.iter().all(|item| item.state == "succeeded");
@@ -976,6 +1439,13 @@ pub fn retry_ledger_sync(app: AppHandle, operation_ids: Vec<String>) -> Result<S
             },
             json!({"status":if success {"success"} else {"error"},"managed_outcomes":outcomes,"operation_kind":"managed_retry"}),
         );
+        if confirmed {
+            let _ = Emitter::emit(
+                &app,
+                "sync:resources_changed",
+                json!({"run_id":id,"run_revision":c.snapshot().revision,"confirmed_effect_ids":outcomes.iter().filter(|item| item.state == "succeeded").filter_map(|item| item.operation_id.clone()).collect::<Vec<_>>()}),
+            );
+        }
     });
     Ok(run)
 }
@@ -983,6 +1453,8 @@ pub fn retry_ledger_sync(app: AppHandle, operation_ids: Vec<String>) -> Result<S
 #[tauri::command]
 pub fn start_ledger_sync(app: AppHandle) -> Result<SyncRun, String> {
     let c = coordinator();
+    c.configure_receipts();
+    crate::sync_process::timeout_seconds(crate::config::get("sync_analysis_timeout_seconds"))?;
     let cfg = crate::managed_import::runtime_config()?;
     let run = c.reserve_analysis(cfg)?;
     let id = run.run_id.clone().unwrap();
@@ -1003,11 +1475,16 @@ pub fn commit_ledger_sync(
     payload: Vec<String>,
 ) -> Result<SyncRun, String> {
     let c = coordinator();
+    c.configure_receipts();
     let (run, plans, cfg) = c.begin_managed_commit(&run_id, &payload)?;
     let id = run_id;
     publish_state(&app, &run);
     tauri::async_runtime::spawn_blocking(move || {
-        let outcomes = crate::managed_import::commit_prepared(plans, &id, cfg);
+        let outcomes = crate::managed_import::commit_prepared_cancellable(plans, &id, cfg, || {
+            c.is_cancelled(&id)
+        });
+        let cancelled = c.is_cancelled(&id);
+        let confirmed = outcomes.iter().any(|item| item.state == "succeeded");
         let success = outcomes.len() == payload.len()
             && !outcomes.is_empty()
             && outcomes.iter().all(|o| o.state == "succeeded");
@@ -1022,20 +1499,44 @@ pub fn commit_ledger_sync(
             &app,
             &id,
             Phase::Committing,
-            if success {
+            if cancelled {
+                Phase::Cancelled
+            } else if success {
                 Phase::Complete
             } else {
                 Phase::Failed
             },
             json!({"status":if success {"success"} else {"error"},"managed_outcomes":outcomes}),
         );
+        if confirmed {
+            let _ = Emitter::emit(
+                &app,
+                "sync:resources_changed",
+                json!({"run_id":id,"run_revision":c.snapshot().revision,"confirmed_effect_ids":outcomes.iter().filter(|item| item.state == "succeeded").filter_map(|item| item.operation_id.clone()).collect::<Vec<_>>()}),
+            );
+        }
     });
     Ok(run)
 }
 
 #[tauri::command]
 pub fn cancel_sync_run(app: AppHandle, run_id: String) -> Result<SyncRun, String> {
-    let run = coordinator().cancel_review(&run_id)?;
+    let c = coordinator();
+    c.configure_receipts();
+    if c.snapshot().run_id.as_deref() == Some(run_id.as_str())
+        && c.snapshot().status == Phase::Review
+    {
+        terminal(
+            &c,
+            &app,
+            &run_id,
+            Phase::Review,
+            Phase::Cancelled,
+            json!({"status":"cancelled","diagnostic_code":"cancelled"}),
+        );
+        return Ok(c.snapshot());
+    }
+    let run = c.request_cancel(&run_id)?;
     publish_state(&app, &run);
     Ok(run)
 }
@@ -1074,6 +1575,22 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+    #[test]
+    fn reveal_opener_receives_only_canonical_path_without_launching_explorer() {
+        let temp = TempDir::new();
+        let inbox = temp.0.join("inbox");
+        fs::create_dir_all(&inbox).unwrap();
+        let file = inbox.join("statement.pdf");
+        fs::write(&file, b"synthetic").unwrap();
+        let canonical = fs::canonicalize(&file).unwrap();
+        let observed = Mutex::new(None);
+        reveal_path_with(canonical.clone(), |path| {
+            *observed.lock().unwrap() = Some(path);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(observed.into_inner().unwrap(), Some(canonical));
     }
     #[derive(Default)]
     struct FakeSink(Mutex<Vec<(String, Value)>>);
@@ -1354,6 +1871,32 @@ mod tests {
         let cancelled = c.cancel_review(&id).unwrap();
         assert_eq!(cancelled.status, Phase::Cancelled);
         assert!(c.reserve(Phase::Analyzing).is_ok());
+    }
+
+    #[test]
+    fn analyzer_cancel_is_run_bound_and_keeps_reservation_until_process_ends() {
+        let temp = TempDir::new();
+        let script = temp.script("import time\ntime.sleep(30)\n");
+        let coordinator = Arc::new(Coordinator::default());
+        let id = start(&coordinator).run_id.unwrap();
+        assert!(coordinator.request_cancel("stale-run-id").is_err());
+        let requested = coordinator.request_cancel(&id).unwrap();
+        assert_eq!(requested.status, Phase::Analyzing);
+        assert!(requested.cancelling);
+        assert!(coordinator.reserve(Phase::Analyzing).is_err());
+
+        analyze_worker(
+            coordinator.clone(),
+            &FakeSink::default(),
+            &id,
+            &python(),
+            &[script],
+        );
+        let final_state = coordinator.snapshot();
+        assert_eq!(final_state.status, Phase::Cancelled);
+        assert_eq!(final_state.analysis_outcome, Some(AnalysisOutcome::Failed));
+        assert!(!final_state.cancelling);
+        assert!(coordinator.reserve(Phase::Analyzing).is_ok());
     }
 
     #[test]
@@ -1747,5 +2290,138 @@ print('received:' + str(len(data)))
                     .unwrap_or("")
                     .starts_with("received:")))
                 .unwrap_or(false)));
+    }
+
+    struct FailedReceiptStore;
+    impl crate::sync_receipts::ReceiptStore for FailedReceiptStore {
+        fn write(&self, _: &crate::sync_receipts::RunReceipt) -> Result<(), &'static str> {
+            Err("publication_failed")
+        }
+    }
+
+    #[test]
+    fn terminal_finalizer_publishes_distinct_analysis_and_commit_receipts_first() {
+        let dir = TempDir::new();
+        let c = Arc::new(Coordinator::default());
+        *c.receipt_store.lock().unwrap() =
+            Some(Arc::new(crate::sync_receipts::FileStore::at(dir.0.clone())));
+        let run = start(&c);
+        let id = run.run_id.clone().unwrap();
+        let (item_id, _) = seed_review(&c, &id, json!({}));
+        c.current.lock().unwrap().status = Phase::Analyzing;
+        let sink = FakeSink::default();
+        terminal(
+            &c,
+            &sink,
+            &id,
+            Phase::Analyzing,
+            Phase::Review,
+            json!({"status":"success","analysis_outcome":"success"}),
+        );
+        let analysis = c.snapshot();
+        assert!(
+            analysis.receipt_id.is_some(),
+            "receipt error {:?}",
+            analysis.receipt_error
+        );
+        let analysis_receipt = crate::sync_receipts::list_at(&dir.0).receipts.remove(0);
+        assert_eq!(analysis_receipt.operation_kind, "analysis");
+        assert_eq!(analysis_receipt.terminal_state, "review");
+        assert_eq!(analysis_receipt.counts.matched, 1);
+        let (_, selected) = c.begin_commit(&id, &[item_id]).unwrap();
+        assert_eq!(selected.len(), 1);
+        terminal(
+            &c,
+            &sink,
+            &id,
+            Phase::Committing,
+            Phase::Complete,
+            json!({"status":"success"}),
+        );
+        let final_run = c.snapshot();
+        assert!(final_run.receipt_error.is_none());
+        assert_ne!(
+            final_run.receipt_id.as_deref(),
+            Some(analysis_receipt.receipt_id.as_str())
+        );
+        let listing = crate::sync_receipts::list_at(&dir.0);
+        assert_eq!(listing.receipts.len(), 2);
+        assert!(listing
+            .receipts
+            .iter()
+            .any(|r| r.operation_kind == "commit" && r.terminal_state == "complete"));
+        let done = sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(event, _)| event == "sync:done")
+            .unwrap()
+            .1
+            .clone();
+        assert_eq!(done["snapshot"]["receipt_id"], json!(final_run.receipt_id));
+        assert!(done["snapshot"]["receipt_error"].is_null());
+    }
+
+    #[test]
+    fn terminal_finalizer_surfaces_fixed_store_error_without_losing_terminal_result() {
+        let c = Coordinator::default();
+        *c.receipt_store.lock().unwrap() = Some(Arc::new(FailedReceiptStore));
+        let run = start(&c);
+        let id = run.run_id.unwrap();
+        let sink = FakeSink::default();
+        terminal(
+            &c,
+            &sink,
+            &id,
+            Phase::Analyzing,
+            Phase::Failed,
+            json!({"status":"error","diagnostic_code":"spawn_failed"}),
+        );
+        let current = c.snapshot();
+        assert_eq!(current.status, Phase::Failed);
+        assert_eq!(current.receipt_error.as_deref(), Some("publication_failed"));
+        assert!(current.receipt_id.is_none());
+        let done = sink.0.lock().unwrap().last().unwrap().1.clone();
+        assert_eq!(done["snapshot"]["receipt_error"], "publication_failed");
+    }
+
+    #[test]
+    fn abandoning_review_writes_a_second_cancelled_receipt() {
+        let dir = TempDir::new();
+        let c = Coordinator::default();
+        *c.receipt_store.lock().unwrap() =
+            Some(Arc::new(crate::sync_receipts::FileStore::at(dir.0.clone())));
+        let run = start(&c);
+        let id = run.run_id.unwrap();
+        seed_review(&c, &id, json!({}));
+        c.current.lock().unwrap().status = Phase::Analyzing;
+        let sink = FakeSink::default();
+        terminal(
+            &c,
+            &sink,
+            &id,
+            Phase::Analyzing,
+            Phase::Review,
+            json!({"status":"success","analysis_outcome":"success"}),
+        );
+        let first = c.snapshot().receipt_id.clone();
+        terminal(
+            &c,
+            &sink,
+            &id,
+            Phase::Review,
+            Phase::Cancelled,
+            json!({"status":"cancelled"}),
+        );
+        let listing = crate::sync_receipts::list_at(&dir.0);
+        assert_eq!(listing.receipts.len(), 2);
+        assert!(listing
+            .receipts
+            .iter()
+            .any(|r| r.terminal_state == "cancelled" && r.operation_kind == "analysis"));
+        assert!(c.snapshot().receipt_id.is_some());
+        assert_ne!(first, c.snapshot().receipt_id);
     }
 }

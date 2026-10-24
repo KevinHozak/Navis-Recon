@@ -161,8 +161,19 @@ export function cancelSyncRun(runId) {
   return invoke('cancel_sync_run', { runId })
 }
 
+export function revealSyncSource(refs) {
+  if (!isDesktopRuntime()) return Promise.reject(new Error('Source reveal requires the Tauri desktop shell.'))
+  if (!refs || typeof refs.sourceRef !== 'string' || !/^src:[a-f0-9]{64}$/i.test(refs.sourceRef)) return Promise.reject(new Error('Source reference is invalid.'))
+  return invoke('reveal_sync_source', { sourceRef: refs.sourceRef, runId: refs.runId ?? null, itemId: refs.itemId ?? null, operationId: refs.operationId ?? null })
+}
+
 // Managed import recovery is a native-only boundary because it reads and may
 // mutate the user's financial ledger and private receipt store.
+export function getSyncReceipts() {
+  if (!isDesktopRuntime()) return Promise.reject(new Error('Sync receipts require the Tauri desktop shell.'))
+  return invoke('get_sync_receipts')
+}
+
 export function getSyncOutcomes() {
   if (!isDesktopRuntime()) return Promise.reject(new Error('Managed import recovery requires the Tauri desktop shell.'))
   return invoke('get_sync_outcomes')
@@ -208,6 +219,11 @@ export async function registerSyncEventListeners(handlers, listenFn, signal) {
 export function listenForSyncEvents(handlers, { signal } = {}) {
   if (!isDesktopRuntime()) return Promise.resolve(() => {})
   return registerSyncEventListeners(handlers, listen, signal)
+}
+
+export async function subscribeSyncResourceChanges(listener) {
+  if (!isDesktopRuntime()) return () => {}
+  return listen('sync:resources_changed', event => listener(event.payload))
 }
 
 export function getStatementCatalog(customPath = null) {
