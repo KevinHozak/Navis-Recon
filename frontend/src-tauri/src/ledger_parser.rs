@@ -90,6 +90,7 @@ pub struct CurrencyTotals {
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct HistorySnapshot {
+    pub evidence_status: String,
     pub name: String,
     pub currency: String,
     #[serde(rename = "Net Worth")]
@@ -973,6 +974,7 @@ fn history_snapshot(
         .map(|(_, amount)| amount)
         .fold(Money::default(), |a, v| a + *v);
     HistorySnapshot {
+        evidence_status: "ledger_entries".into(),
         name,
         currency: currency.to_string(),
         net_worth,
@@ -1003,18 +1005,21 @@ fn next_month(month: &str) -> String {
         format!("{year:04}-{:02}", month_number + 1)
     }
 }
-fn history_from_transactions_for_currency(
+pub(crate) fn history_for_range(
     transactions: &[Transaction],
     currency: &str,
+    range: Option<(&str, &str)>,
 ) -> Vec<HistorySnapshot> {
-    let transactions: Vec<Transaction> = transactions
+    let mut transactions: Vec<Transaction> = transactions
         .iter()
+        .filter(|tx| range.is_none_or(|(_, end)| tx.date.as_str() <= end))
         .flat_map(|tx| {
             let mut copy = tx.clone();
             copy.postings.retain(|p| p.currency == currency);
-            std::iter::once(copy)
+            (!copy.postings.is_empty()).then_some(copy)
         })
         .collect();
+    transactions.sort_by(|a, b| a.date.cmp(&b.date)); // Stable sort preserves source order on the same date.
     let mut balances = BTreeMap::new();
     let mut monthly = BTreeMap::new();
     for transaction in transactions {
@@ -1029,7 +1034,9 @@ fn history_from_transactions_for_currency(
     let Some(first) = monthly.keys().next().cloned() else {
         return Vec::new();
     };
-    let last = monthly.keys().next_back().cloned().unwrap_or(first.clone());
+    let last = range
+        .map(|(_, end)| end[..7].to_string())
+        .unwrap_or_else(|| monthly.keys().next_back().cloned().unwrap_or(first.clone()));
     let mut results = Vec::new();
     let mut current = first;
     let mut previous = None;
@@ -1037,19 +1044,34 @@ fn history_from_transactions_for_currency(
         if let Some(value) = monthly.get(&current) {
             previous = Some(value.clone());
         }
-        if let Some(value) = previous.clone() {
-            results.push(value);
+        if let Some(mut value) = previous.clone() {
+            value.name = current.clone();
+            if !monthly.contains_key(&current) {
+                value.evidence_status = "carried_forward".into();
+            }
+            if range.is_none_or(|(start, _)| current.as_str() >= &start[..7]) {
+                results.push(value);
+            }
+        }
+        if current == last {
+            break;
         }
         current = next_month(&current);
     }
     results
         .into_iter()
         .rev()
-        .take(24)
+        .take(if range.is_some() { usize::MAX } else { 24 })
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
         .collect()
+}
+fn history_from_transactions_for_currency(
+    transactions: &[Transaction],
+    currency: &str,
+) -> Vec<HistorySnapshot> {
+    history_for_range(transactions, currency, None)
 }
 fn history_from_transactions(transactions: &[Transaction]) -> Vec<HistorySnapshot> {
     history_from_transactions_for_currency(transactions, crate::config::get("ledger_currency"))
@@ -1600,7 +1622,8 @@ mod strict_subset_tests {
         ];
         let history = history_from_transactions(&transactions);
         assert_eq!(history.len(), 3);
-        assert_eq!(history[1].name, "2024-01");
+        assert_eq!(history[1].name, "2024-02");
+        assert_eq!(history[1].evidence_status, "carried_forward");
         assert_eq!(history[0].net_worth, Money::parse("10").unwrap());
         assert_eq!(history[1].net_worth, Money::parse("10").unwrap());
         assert_eq!(history[2].net_worth, Money::parse("15").unwrap());

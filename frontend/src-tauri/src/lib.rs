@@ -1,6 +1,7 @@
 mod checklist;
 mod config;
 mod document_store;
+mod household_analysis;
 mod ledger_parser;
 mod ledger_review;
 mod managed_import;
@@ -44,6 +45,9 @@ pub fn run() {
             ledger_parser::get_ledger_summary,
             ledger_parser::get_ledger_source_state,
             ledger_parser::get_ledger_history,
+            household_analysis::get_household_analysis,
+            household_analysis::get_cash_forecast,
+            household_analysis::save_forecast_settings,
             ledger_parser::get_ledger_transactions,
             obligations::get_recurring_obligations,
             obligations::get_subscription_registry,

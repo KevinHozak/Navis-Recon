@@ -175,3 +175,8 @@ The external finance processor is analysis-only. Its observed legacy --commit la
 ## Reconciliation and checklist persistence (RECON-E004)
 
 See [reconciliation policy and persistence](reconciliation.md). `reconciliation.rs` owns explicit account/period evidence, validated cutoff comparisons and status gates. `document_store.rs` supplies revision-checked JSON publication for reconciliation and the legacy checklist. The Statement Library opens the comparison workspace; existing month flags remain legacy status rather than evidence.
+
+
+## Household analysis (RECON-E005)
+
+See [history, movement and cash-scenario policy](household-analysis.md). The Wealth view exposes explicit period comparisons and source-transaction drill-down; the Subscriptions view adds selected-liquid-account scenarios built on the existing obligation detector. `household_analysis.rs` owns snapshot validation, exact decomposition and forecast/settings contracts.

@@ -1,3 +1,4 @@
+import CashForecastWidget from './CashForecastWidget'
 import { useState, useEffect, useMemo } from 'react';
 import { getRecurringObligations, saveSubscriptionMetadata } from '../services/apiClient';
 import { addMoney, formatMoney, multiplyDivideMoney } from '../utils/money';
@@ -9,7 +10,7 @@ export default function SubscriptionsWidget() {
   const [selectedCurrency, setSelectedCurrency] = useState('USD');
   const currencies = [...new Set(obligations.map(ob => ob.currency || ob.metadata?.currency || 'USD'))];
   const currency = currencies.includes(selectedCurrency) ? selectedCurrency : (currencies.includes('USD') ? 'USD' : currencies[0]);
-  const activeObligations = obligations.filter(ob => (ob.currency || ob.metadata?.currency || 'USD') === currency);
+  const activeObligations = obligations.filter(ob => (ob.currency || ob.metadata?.currency || 'USD') === currency && !(ob.metadata?.forecast_cancelled ?? ob.metadata?.extra?.forecast_cancelled));
 
   // Filters & Search
   const [searchTerm, setSearchTerm] = useState('');
@@ -270,6 +271,7 @@ export default function SubscriptionsWidget() {
     const leadDaysNum = parseInt(editAlertLeadDays, 10);
 
     const newMetadata = {
+      ...(editingItem.metadata || {}),
       key: editingItem.key,
       payee: editingItem.payee,
       account: editingItem.account,
@@ -371,6 +373,7 @@ export default function SubscriptionsWidget() {
 
   return (
     <div className="space-y-8">
+      <CashForecastWidget />
       {/* Header Banner */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-white/10 pb-6">
         <div>

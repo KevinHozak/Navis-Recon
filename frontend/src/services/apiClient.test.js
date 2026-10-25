@@ -180,3 +180,15 @@ test('checklist CAS and reconciliation use desktop IPC with exact string balance
     await assert.rejects(api.getReconciliations(), /Tauri desktop shell/)
   } finally { if (had) globalThis.window = old; else delete globalThis.window }
 })
+
+
+test('household analysis and forecasts send explicit ranges, accounts and decimal settings over native IPC only', async () => {
+  const api = await import('./apiClient.js'); const had = Object.hasOwn(globalThis,'window'); const old = globalThis.window; const calls = []
+  try {
+    globalThis.window = { __TAURI_INTERNALS__: { invoke: async (command,args) => { calls.push({command,args}); return null } } }
+    const request = { start: '2026-01-01', end: '2026-02-28', currency: 'EUR' }; const forecast = { as_of: '2026-03-01', liquid_accounts: ['Assets:Bank'], horizon_days: 30, currency: 'EUR', include_estimates: false }; const settings = { amount: '12.000000000000000001' }
+    await api.getHouseholdAnalysis(request); await api.getCashForecast(forecast); await api.saveForecastSettings(settings,'revision')
+    assert.deepEqual(calls,[{command:'get_household_analysis',args:{request}},{command:'get_cash_forecast',args:{request:forecast}},{command:'save_forecast_settings',args:{settings,expectedRevision:'revision'}}])
+    delete globalThis.window; await assert.rejects(api.getCashForecast(forecast), /Tauri desktop shell/)
+  } finally { if(had) globalThis.window=old; else delete globalThis.window }
+})

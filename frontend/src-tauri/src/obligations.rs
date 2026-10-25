@@ -700,6 +700,7 @@ pub fn get_subscription_registry() -> Result<SubscriptionRegistryPayload, String
 #[tauri::command]
 pub fn save_subscription_metadata(metadata: SubscriptionMetadata) -> Result<(), String> {
     let path = Path::new(crate::config::get("subscriptions_path"));
+    let _lock = crate::document_store::lock(path)?;
     let mut payload = if path.exists() {
         load_subscription_registry(path)?
     } else {
@@ -717,12 +718,29 @@ pub fn save_subscription_metadata(metadata: SubscriptionMetadata) -> Result<(), 
         .iter_mut()
         .find(|item| item.key == entry.key)
     {
+        preserve_forecast_settings(existing, &mut entry);
         *existing = entry;
     } else {
         payload.subscriptions.push(entry);
     }
 
     save_subscription_registry(path, &payload)
+}
+
+// Forecast settings have their own revision-checked editor. A stale general editor
+// must not undo a confirmed bill, cancellation or cash-funding mapping.
+fn preserve_forecast_settings(
+    existing: &SubscriptionMetadata,
+    incoming: &mut SubscriptionMetadata,
+) {
+    incoming
+        .extra
+        .retain(|key, _| !key.starts_with("forecast_"));
+    for (key, value) in &existing.extra {
+        if key.starts_with("forecast_") {
+            incoming.extra.insert(key.clone(), value.clone());
+        }
+    }
 }
 
 /// Tauri command to save the complete subscription registry payload.
@@ -1430,5 +1448,22 @@ mod tests {
 
         let obligations = analyze_recurring_obligations(&txs, Some("2026-04-30"));
         assert!(obligations.is_empty());
+    }
+    #[test]
+    fn stale_general_metadata_editor_cannot_undo_forecast_cancellation() {
+        let mut saved = SubscriptionMetadata::default();
+        saved
+            .extra
+            .insert("forecast_cancelled".into(), serde_json::json!(true));
+        let mut incoming = SubscriptionMetadata {
+            notes: Some("Updated note".into()),
+            ..Default::default()
+        };
+        incoming
+            .extra
+            .insert("forecast_cancelled".into(), serde_json::json!(false));
+        preserve_forecast_settings(&saved, &mut incoming);
+        assert_eq!(incoming.extra["forecast_cancelled"], true);
+        assert_eq!(incoming.notes.as_deref(), Some("Updated note"));
     }
 }

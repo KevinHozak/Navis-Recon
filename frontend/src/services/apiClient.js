@@ -319,3 +319,7 @@ export function revealRecordFile(filePath) {
 }
 
 export { API_BASE }
+
+export function getHouseholdAnalysis(request) { return desktopRequest('get_household_analysis', { request }) }
+export function getCashForecast(request) { return desktopRequest('get_cash_forecast', { request }) }
+export function saveForecastSettings(settings, expectedRevision) { return desktopRequest('save_forecast_settings', { settings, expectedRevision }) }
