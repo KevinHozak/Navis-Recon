@@ -66,7 +66,7 @@ const SyncWidget = () => {
       {(status === 'idle' || status === 'analyzing' || status === 'failed' || status === 'cancelled') && <div className="flex-1 flex flex-col font-mono text-sm">
         <div className="bg-zinc-900 px-4 py-2 border-b border-white/10 text-white/30 text-xs uppercase">Analyzer Terminal</div>
         <div ref={scrollRef} className="flex-1 p-6 overflow-y-auto custom-scrollbar">
-          {status === 'failed' && <div className="text-red-400 mb-3">Sync failed.</div>}{status === 'cancelled' && <div className="text-white/50 mb-3">Review abandoned.</div>}
+          {status === 'failed' && <div className="text-red-400 mb-3">Sync failed.</div>}{status === 'cancelled' && <div className="text-white/50 mb-3">Sync cancelled.</div>}
           {logs.map((log, index) => <div key={index} className="text-white/70 break-all">&gt; {displayText(log.message)}</div>)}
           {errors.map((item, index) => <div key={`error-${index}`} className="text-red-400 break-all">&gt; Error: {displayText(item.message) || 'Unknown sync error'}</div>)}
           {status === 'analyzing' && <div className="text-white/50 animate-pulse mt-2">&gt; _</div>}

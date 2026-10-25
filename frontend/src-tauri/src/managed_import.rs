@@ -1025,7 +1025,10 @@ fn batch_preflight(items: &[serde_json::Value], cfg: &ImportConfig) -> Vec<Optio
     errors
 }
 
-pub(crate) fn retry_operations(operation_ids: Vec<String>) -> Vec<ItemOutcome> {
+pub(crate) fn retry_operations_cancellable(
+    operation_ids: Vec<String>,
+    cancelled: impl FnMut() -> bool,
+) -> Vec<ItemOutcome> {
     let cfg = match runtime_config() {
         Ok(c) => c,
         Err(_) => {
@@ -1038,10 +1041,19 @@ pub(crate) fn retry_operations(operation_ids: Vec<String>) -> Vec<ItemOutcome> {
     // Reconcile durable intents first; this promotes only exact observed effects or
     // records a no-effects state whose retry preconditions can be checked again.
     let _ = outcomes_with_config(&cfg);
-    retry_with_config(operation_ids, cfg)
+    retry_with_config_cancellable(operation_ids, cfg, cancelled)
 }
 
+#[cfg(test)]
 fn retry_with_config(operation_ids: Vec<String>, cfg: ImportConfig) -> Vec<ItemOutcome> {
+    retry_with_config_cancellable(operation_ids, cfg, || false)
+}
+
+fn retry_with_config_cancellable(
+    operation_ids: Vec<String>,
+    cfg: ImportConfig,
+    mut cancelled: impl FnMut() -> bool,
+) -> Vec<ItemOutcome> {
     let _journal = match journal_lock(&cfg.store) {
         Ok(g) => g,
         Err(_) => {
@@ -1078,10 +1090,12 @@ fn retry_with_config(operation_ids: Vec<String>, cfg: ImportConfig) -> Vec<ItemO
             Ok(receipt)
         })
         .collect::<Vec<_>>();
+    let mut cancellation_requested = false;
     operation_ids
         .into_iter()
         .zip(validated)
         .map(|(id, prepared)| {
+            cancellation_requested |= cancelled();
             let filename = String::new();
             let valid_id = id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit());
             let result = (|| -> Result<ItemOutcome, String> {
@@ -1107,6 +1121,23 @@ fn retry_with_config(operation_ids: Vec<String>, cfg: ImportConfig) -> Vec<ItemO
                         });
                     }
                     return Err("Prior operation effects do not reconcile".into());
+                }
+                if cancellation_requested {
+                    return Ok(ItemOutcome {
+                        item_id: receipt.item_id,
+                        filename: receipt.filename,
+                        state: if receipt.state == "failed" {
+                            "failed"
+                        } else {
+                            "uncertain"
+                        }
+                        .into(),
+                        retry_safe: false,
+                        message:
+                            "Retry cancelled before this item started; prior durable state retained"
+                                .into(),
+                        operation_id: Some(receipt.identity),
+                    });
                 }
                 if !((receipt.state == "failed" && receipt.retry_safe)
                     || receipt.state == "archived")
@@ -2457,6 +2488,97 @@ mod tests {
         let retry = commit_with_config(vec![item2], "retry", cfg, FaultPlan::default());
         assert_eq!(retry[0].state, "succeeded");
         assert_eq!(fs::read(&cfg2.ledger).unwrap(), after);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn retry_cancellation_preserves_effects_and_never_starts_later_items() {
+        for cancel_before_first in [true, false] {
+            let (_dir, cfg, item) = fixture();
+            fs::write(
+                cfg.inbox.join("source-two.pdf"),
+                b"second synthetic statement",
+            )
+            .unwrap();
+            let mut second = item.clone();
+            second["filename"] = serde_json::json!("source-two.pdf");
+            second["new_name"] = serde_json::json!("Bank 2026-10-24.pdf");
+            second["date"] = serde_json::json!("2026-10-24");
+            let plans = vec![
+                ("first".into(), prepare(&item, &cfg).unwrap()),
+                ("second".into(), prepare(&second, &cfg).unwrap()),
+            ];
+            let before = fs::read(&cfg.ledger).unwrap();
+            let seeded = commit_prepared_cancellable(plans, "cancelled-seed", cfg.clone(), || true);
+            assert!(seeded.iter().all(|o| o.state == "failed"));
+            let ids = seeded
+                .iter()
+                .map(|o| o.operation_id.clone().unwrap())
+                .collect();
+            let mut checks = 0;
+            let outcomes = retry_with_config_cancellable(ids, cfg.clone(), || {
+                checks += 1;
+                cancel_before_first || checks > 1
+            });
+            assert_eq!(
+                outcomes[0].state,
+                if cancel_before_first {
+                    "failed"
+                } else {
+                    "succeeded"
+                }
+            );
+            assert_eq!(outcomes[1].state, "failed");
+            assert!(!outcomes[1].retry_safe); // Reconciliation must recheck the current ledger.
+            assert!(outcomes[1].message.contains("cancelled"));
+            assert!(!cfg
+                .archive
+                .join("Statements 2026/Bank 2026-10-24.pdf")
+                .exists());
+            if cancel_before_first {
+                assert_eq!(fs::read(&cfg.ledger).unwrap(), before);
+                assert!(outcomes_with_config(&cfg).iter().all(|o| o.retry_safe));
+            } else {
+                let after = fs::read_to_string(&cfg.ledger).unwrap();
+                assert!(after.contains("Bank 2026-10-23.pdf"));
+                assert!(!after.contains("Bank 2026-10-24.pdf"));
+                let durable = outcomes_with_config(&cfg);
+                assert_eq!(durable.iter().filter(|o| o.state == "succeeded").count(), 1);
+                assert!(durable
+                    .iter()
+                    .filter(|o| o.state != "succeeded")
+                    .all(|o| !o.retry_safe));
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn retry_cancellation_retains_owned_archive_without_appending_ledger() {
+        let (_dir, cfg, item) = fixture();
+        let before = fs::read(&cfg.ledger).unwrap();
+        let interrupted = commit_with_config(
+            vec![item],
+            "archive-interrupted",
+            cfg.clone(),
+            FaultPlan {
+                after_archive: true,
+                ..FaultPlan::default()
+            },
+        );
+        assert_eq!(interrupted[0].state, "uncertain");
+        let id = identity(&cfg.ledger, &hash(b"synthetic statement bytes"));
+        let archive = cfg.archive.join("Statements 2026/Bank 2026-10-23.pdf");
+        let archive_before = fs::read(&archive).unwrap();
+        let outcome = retry_with_config_cancellable(vec![id.clone()], cfg.clone(), || true);
+        assert_eq!(outcome[0].state, "uncertain");
+        assert!(!outcome[0].retry_safe);
+        assert_eq!(fs::read(&cfg.ledger).unwrap(), before);
+        assert_eq!(fs::read(&archive).unwrap(), archive_before);
+        assert_eq!(
+            retry_with_config(vec![id], cfg.clone())[0].state,
+            "succeeded"
+        );
     }
 
     #[cfg(windows)]

@@ -1416,7 +1416,10 @@ pub fn retry_ledger_sync(app: AppHandle, operation_ids: Vec<String>) -> Result<S
     let expected_count = operation_ids.len();
     publish_state(&app, &run);
     tauri::async_runtime::spawn_blocking(move || {
-        let outcomes = crate::managed_import::retry_operations(operation_ids);
+        let outcomes = crate::managed_import::retry_operations_cancellable(operation_ids, || {
+            c.is_cancelled(&id)
+        });
+        let cancelled = c.is_cancelled(&id);
         let confirmed = outcomes.iter().any(|item| item.state == "succeeded");
         let success = outcomes.len() == expected_count
             && !outcomes.is_empty()
@@ -1432,7 +1435,9 @@ pub fn retry_ledger_sync(app: AppHandle, operation_ids: Vec<String>) -> Result<S
             &app,
             &id,
             Phase::Committing,
-            if success {
+            if cancelled {
+                Phase::Cancelled
+            } else if success {
                 Phase::Complete
             } else {
                 Phase::Failed
