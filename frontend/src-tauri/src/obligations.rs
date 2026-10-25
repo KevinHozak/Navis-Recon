@@ -750,6 +750,7 @@ mod tests {
             ("2026-03-01", "10", "20"),
         ] {
             txs.push(Transaction {
+                flag: '*',
                 date: date.into(),
                 payee: "Service".into(),
                 narration: "".into(),
@@ -784,6 +785,7 @@ mod tests {
         let mut txs = Vec::new();
         for date in ["2026-01-01", "2026-02-01", "2026-03-01"] {
             txs.push(Transaction {
+                flag: '*',
                 date: date.into(),
                 payee: "Service".into(),
                 narration: "".into(),
@@ -905,6 +907,7 @@ mod tests {
     fn test_detect_monthly_subscription() {
         let txs = vec![
             Transaction {
+                flag: '*',
                 date: "2026-01-15".to_string(),
                 payee: "Netflix".to_string(),
                 narration: "".to_string(),
@@ -915,6 +918,7 @@ mod tests {
                 }],
             },
             Transaction {
+                flag: '*',
                 date: "2026-02-15".to_string(),
                 payee: "Netflix".to_string(),
                 narration: "".to_string(),
@@ -925,6 +929,7 @@ mod tests {
                 }],
             },
             Transaction {
+                flag: '*',
                 date: "2026-03-15".to_string(),
                 payee: "Netflix".to_string(),
                 narration: "".to_string(),
@@ -935,6 +940,7 @@ mod tests {
                 }],
             },
             Transaction {
+                flag: '*',
                 date: "2026-04-15".to_string(),
                 payee: "Netflix".to_string(),
                 narration: "".to_string(),
@@ -964,6 +970,7 @@ mod tests {
     fn test_detect_annual_subscription() {
         let txs = vec![
             Transaction {
+                flag: '*',
                 date: "2024-03-10".to_string(),
                 payee: "Costco Renewal".to_string(),
                 narration: "".to_string(),
@@ -974,6 +981,7 @@ mod tests {
                 }],
             },
             Transaction {
+                flag: '*',
                 date: "2025-03-10".to_string(),
                 payee: "Costco Renewal".to_string(),
                 narration: "".to_string(),
@@ -984,6 +992,7 @@ mod tests {
                 }],
             },
             Transaction {
+                flag: '*',
                 date: "2026-03-10".to_string(),
                 payee: "Costco Renewal".to_string(),
                 narration: "".to_string(),
@@ -1011,6 +1020,7 @@ mod tests {
     fn test_detect_biweekly_payroll_obligation() {
         let txs = vec![
             Transaction {
+                flag: '*',
                 date: "2026-01-02".to_string(),
                 payee: "Benefits Provider".to_string(),
                 narration: "".to_string(),
@@ -1021,6 +1031,7 @@ mod tests {
                 }],
             },
             Transaction {
+                flag: '*',
                 date: "2026-01-16".to_string(),
                 payee: "Benefits Provider".to_string(),
                 narration: "".to_string(),
@@ -1031,6 +1042,7 @@ mod tests {
                 }],
             },
             Transaction {
+                flag: '*',
                 date: "2026-01-30".to_string(),
                 payee: "Benefits Provider".to_string(),
                 narration: "".to_string(),
@@ -1041,6 +1053,7 @@ mod tests {
                 }],
             },
             Transaction {
+                flag: '*',
                 date: "2026-02-13".to_string(),
                 payee: "Benefits Provider".to_string(),
                 narration: "".to_string(),
@@ -1064,6 +1077,7 @@ mod tests {
     fn test_even_count_median_calculation() {
         let txs = vec![
             Transaction {
+                flag: '*',
                 date: "2026-01-01".to_string(),
                 payee: "Streaming".to_string(),
                 narration: "".to_string(),
@@ -1074,6 +1088,7 @@ mod tests {
                 }],
             },
             Transaction {
+                flag: '*',
                 date: "2026-02-01".to_string(),
                 payee: "Streaming".to_string(),
                 narration: "".to_string(),
@@ -1096,6 +1111,7 @@ mod tests {
     fn test_price_increase_detection() {
         let txs = vec![
             Transaction {
+                flag: '*',
                 date: "2026-01-01".to_string(),
                 payee: "Cloud Storage".to_string(),
                 narration: "".to_string(),
@@ -1106,6 +1122,7 @@ mod tests {
                 }],
             },
             Transaction {
+                flag: '*',
                 date: "2026-02-01".to_string(),
                 payee: "Cloud Storage".to_string(),
                 narration: "".to_string(),
@@ -1116,6 +1133,7 @@ mod tests {
                 }],
             },
             Transaction {
+                flag: '*',
                 date: "2026-03-01".to_string(),
                 payee: "Cloud Storage".to_string(),
                 narration: "".to_string(),
@@ -1225,6 +1243,7 @@ mod tests {
             .into_iter()
             .zip(["0.000000000000000001", "0.000000000000000002"])
             .map(|(date, amount)| Transaction {
+                flag: '*',
                 date: date.into(),
                 payee: "Tiny".into(),
                 narration: "".into(),
@@ -1249,6 +1268,7 @@ mod tests {
     fn test_trial_and_renewal_radar() {
         let txs = vec![
             Transaction {
+                flag: '*',
                 date: "2025-05-01".to_string(),
                 payee: "Annual Service".to_string(),
                 narration: "".to_string(),
@@ -1259,6 +1279,7 @@ mod tests {
                 }],
             },
             Transaction {
+                flag: '*',
                 date: "2026-05-01".to_string(),
                 payee: "Annual Service".to_string(),
                 narration: "".to_string(),
@@ -1362,6 +1383,7 @@ mod tests {
         // Amazon purchases on random days with huge interval variance
         let txs = vec![
             Transaction {
+                flag: '*',
                 date: "2026-01-03".to_string(),
                 payee: "Amazon".to_string(),
                 narration: "".to_string(),
@@ -1372,6 +1394,7 @@ mod tests {
                 }],
             },
             Transaction {
+                flag: '*',
                 date: "2026-01-05".to_string(),
                 payee: "Amazon".to_string(),
                 narration: "".to_string(),
@@ -1382,6 +1405,7 @@ mod tests {
                 }],
             },
             Transaction {
+                flag: '*',
                 date: "2026-02-20".to_string(),
                 payee: "Amazon".to_string(),
                 narration: "".to_string(),
@@ -1392,6 +1416,7 @@ mod tests {
                 }],
             },
             Transaction {
+                flag: '*',
                 date: "2026-04-10".to_string(),
                 payee: "Amazon".to_string(),
                 narration: "".to_string(),

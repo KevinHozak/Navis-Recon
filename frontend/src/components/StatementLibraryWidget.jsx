@@ -1,5 +1,6 @@
+import ReconciliationWorkspace from './ReconciliationWorkspace'
 import { useState, useEffect, useMemo } from 'react';
-import { getStatementCatalog, openStatementFile, getVaultChecklist, saveVaultChecklist } from '../services/apiClient';
+import { getStatementCatalog, openStatementFile, getVaultChecklist } from '../services/apiClient';
 import { findBestInstitutionMatch } from '../utils/institutionMatching';
 
 export default function StatementLibraryWidget({ initialFilter = null, onNavigateToChecklist = null }) {
@@ -9,7 +10,8 @@ export default function StatementLibraryWidget({ initialFilter = null, onNavigat
   const [error, setError] = useState(null);
   const [openingPath, setOpeningPath] = useState(null);
   const [openError, setOpenError] = useState(null);
-  const [reconcilingPath, setReconcilingPath] = useState(null);
+  const [reconcileStatement, setReconcileStatement] = useState(null);
+  const [reconciliations, setReconciliations] = useState(null);
 
   // Filters
   const [searchTerm, setSearchTerm] = useState(initialFilter?.search || '');
@@ -139,28 +141,9 @@ export default function StatementLibraryWidget({ initialFilter = null, onNavigat
     };
   };
 
-  const isStatementUnreviewed = (stmt) => {
-    const status = getStatementChecklistStatus(stmt);
-    return status ? !status.isReviewed : false;
-  };
-
-  const handleToggleReconcile = async (stmt) => {
-    const status = getStatementChecklistStatus(stmt);
-    if (!status || !checklist) return;
-
-    setReconcilingPath(stmt.path);
-    try {
-      const newChecklist = structuredClone(checklist);
-      const current = Boolean(newChecklist.statements[status.instIndex].months[status.monthIndex]);
-      newChecklist.statements[status.instIndex].months[status.monthIndex] = !current;
-      setChecklist(newChecklist);
-      await saveVaultChecklist(newChecklist);
-    } catch (err) {
-      console.error("Failed to toggle reconciliation status:", err);
-      setOpenError(`Failed to update checklist: ${err?.message || String(err)}`);
-    } finally {
-      setReconcilingPath(null);
-    }
+  const isStatementUnreviewed = stmt => {
+    const records = reconciliations?.records.filter(r => r.draft.statement_path === stmt.path) || [];
+    return !records.length || records.some(r => r.draft.status !== 'reconciled' || reconciliations.stale_ids.includes(r.draft.id));
   };
 
   // Filtered statements list
@@ -203,7 +186,7 @@ export default function StatementLibraryWidget({ initialFilter = null, onNavigat
       return true;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [catalog, searchTerm, selectedInstitution, selectedYear, selectedStatus, anomalyFilesSet, checklist]);
+  }, [catalog, searchTerm, selectedInstitution, selectedYear, selectedStatus, anomalyFilesSet, checklist, reconciliations]);
 
   // Format byte size human readable
   const formatBytes = (bytes) => {
@@ -480,6 +463,8 @@ export default function StatementLibraryWidget({ initialFilter = null, onNavigat
         </div>
       </div>
 
+      <ReconciliationWorkspace key={reconcileStatement?.path || 'none'} statement={reconcileStatement} onSaved={setReconciliations} />
+
       {/* Statement Table */}
       <div className="bg-zinc-950/80 border border-white/10 rounded-xl overflow-hidden backdrop-blur-md shadow-2xl">
         <div className="overflow-x-auto custom-scrollbar">
@@ -591,26 +576,8 @@ export default function StatementLibraryWidget({ initialFilter = null, onNavigat
                           >
                             {isOpening ? 'Opening...' : 'View PDF'}
                           </button>
-                          {(() => {
-                            const checkStatus = getStatementChecklistStatus(stmt);
-                            if (!checkStatus) return null;
-                            const isReconciling = reconcilingPath === stmt.path;
-                            return (
-                              <button
-                                type="button"
-                                onClick={() => handleToggleReconcile(stmt)}
-                                disabled={isReconciling}
-                                title={checkStatus.isReviewed ? "Mark Unreconciled in Checklist" : "Mark Reconciled in Checklist"}
-                                className={`px-2 py-1 rounded text-[11px] font-bold uppercase tracking-wider border transition-all disabled:opacity-50 ${
-                                  checkStatus.isReviewed
-                                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30'
-                                    : 'bg-white/5 text-white/50 border-white/10 hover:border-emerald-400 hover:text-emerald-400'
-                                }`}
-                              >
-                                {isReconciling ? '...' : (checkStatus.isReviewed ? '✓ Reconciled' : 'Reconcile')}
-                              </button>
-                            );
-                          })()}
+                          <button type="button" onClick={() => setReconcileStatement(stmt)} className="px-2 py-1 rounded border border-cyan-400/30 text-cyan-300">Reconcile</button>
+                          {getStatementChecklistStatus(stmt)?.isReviewed && <span className="text-white/40 text-[10px]">Legacy checked</span>}
                           {onNavigateToChecklist && (
                             <button
                               type="button"

@@ -1,24 +1,34 @@
-import { useState, useEffect, useMemo } from 'react';
+import { createDocumentSaver } from '../services/documentSaver'
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { getVaultChecklist, saveVaultChecklist, getStatementCatalog, openStatementFile } from '../services/apiClient';
 import { findBestInstitutionMatch, findMatchingStatements } from '../utils/institutionMatching';
 
 export default function VaultChecklist({ onNavigateToStatements = null }) {
+  const loadGeneration = useRef(0);
   const [data, setData] = useState(null);
   const [catalog, setCatalog] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [openingPath, setOpeningPath] = useState(null);
+  const [saved, setSaved] = useState(false);
   const [actionError, setActionError] = useState(null);
+  const [saver] = useState(() => createDocumentSaver({ persist: saveVaultChecklist, onChange: state => {
+    if (state.snapshot) setData(state.snapshot);
+    setSaving(state.status === 'saving'); setSaved(state.status === 'saved');
+    setActionError(state.error ? `Checklist not saved: ${state.error}` : null);
+  } }));
+  const [openingPath, setOpeningPath] = useState(null);
 
   async function loadData() {
+    if (saver.isBusy()) return;
+    const generation = ++loadGeneration.current;
     setLoading(true);
     setActionError(null);
     try {
       const [checklistJson, catalogJson] = await Promise.all([
         getVaultChecklist().catch(err => {
           console.error("DEBUG: Failed to fetch checklist:", err);
-          return null;
+          throw err;
         }),
         getStatementCatalog().catch(err => {
           console.warn("DEBUG: Statement catalog not available:", err);
@@ -26,37 +36,31 @@ export default function VaultChecklist({ onNavigateToStatements = null }) {
         }),
       ]);
 
+      if (generation !== loadGeneration.current) return;
       if (checklistJson && !checklistJson.error) {
-        setData(checklistJson);
+        saver.accept(checklistJson);
       }
       if (catalogJson && !catalogJson.error) {
         setCatalog(catalogJson);
       }
     } catch (err) {
       console.error("DEBUG: Error loading checklist view data:", err);
-      setActionError(err?.message || String(err));
+      if (generation === loadGeneration.current) setActionError(err?.message || String(err));
     } finally {
-      setLoading(false);
+      if (generation === loadGeneration.current) setLoading(false);
     }
   }
 
-  async function saveChecklist(updatedData) {
-    setSaving(true);
-    try {
-      await saveVaultChecklist(updatedData);
-    } catch (err) {
-      console.error("DEBUG: Failed to save checklist:", err);
-      setActionError(`Failed to save checklist: ${err?.message || String(err)}`);
-    } finally {
-      setSaving(false);
-    }
-  }
-
+  const saveChecklist = updatedData => { loadGeneration.current++; return saver.save(updatedData); };
   useEffect(() => {
-    // Loading external checklist and catalog state on mount
+    saver.activate();
+    // Initial external document load; the saver owns all persisted UI updates.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadData();
-  }, []);
+    return () => saver.dispose();
+    // loadData deliberately uses the stable saver instance.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saver]);
 
   const handleOpenPdf = async (path, filename) => {
     setOpeningPath(path);
@@ -72,16 +76,16 @@ export default function VaultChecklist({ onNavigateToStatements = null }) {
   };
 
   const handleStatementToggle = (instIndex, monthIndex) => {
+    if (saver.isBusy()) return;
     const newData = structuredClone(data);
     newData.statements[instIndex].months[monthIndex] = !newData.statements[instIndex].months[monthIndex];
-    setData(newData);
     saveChecklist(newData);
   };
 
   const handleTaskToggle = (weekIndex, taskIndex) => {
+    if (saver.isBusy()) return;
     const newData = structuredClone(data);
     newData.triage[weekIndex].tasks[taskIndex].completed = !newData.triage[weekIndex].tasks[taskIndex].completed;
-    setData(newData);
     saveChecklist(newData);
   };
 
@@ -137,7 +141,7 @@ export default function VaultChecklist({ onNavigateToStatements = null }) {
     );
   }
 
-  if (!data) return <div className="text-white p-6">Error loading checklist data.</div>;
+  if (!data) return <div role="alert" className="text-red-300 p-6">{actionError || 'Error loading checklist data.'} <button type="button" className="underline ml-3" onClick={loadData}>Refresh checklist</button></div>;
 
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -150,6 +154,7 @@ export default function VaultChecklist({ onNavigateToStatements = null }) {
         <h2 className="text-3xl font-black text-white tracking-widest uppercase italic">Master Checklist</h2>
         <p className="text-sm font-mono text-cyan-400/80 uppercase tracking-widest">Sovereign Ledger Operations</p>
         <div className="flex items-center gap-4 text-xs font-mono">
+          {saved && <span role="status" className="text-emerald-300">Saved</span>}
           {saving && <span className="text-amber-400 animate-pulse">Saving changes...</span>}
           {catalog && (
             <span className="text-white/40">
@@ -159,7 +164,7 @@ export default function VaultChecklist({ onNavigateToStatements = null }) {
         </div>
         {actionError && (
           <div className="mt-2 px-4 py-2 bg-red-500/10 border border-red-500/30 rounded text-red-300 text-xs font-mono">
-            {actionError}
+            {actionError} <button type="button" disabled={saving} onClick={loadData} className="underline ml-3">Refresh persisted checklist</button>
           </div>
         )}
       </div>
@@ -230,8 +235,9 @@ export default function VaultChecklist({ onNavigateToStatements = null }) {
                         <div className="flex items-center gap-3 min-w-0">
                           <button 
                             type="button"
+                            disabled={saving}
                             onClick={() => handleTaskToggle(wIdx, tIdx)}
-                            title={task.completed ? "Mark pending" : "Mark completed / reconciled"}
+                            title={task.completed ? "Mark pending" : "Mark task completed"}
                             className={`w-5 h-5 rounded border flex items-center justify-center shrink-0 transition-all ${
                               task.completed 
                               ? 'bg-emerald-500 border-emerald-500 text-black shadow-[0_0_8px_rgba(16,185,129,0.5)]' 
@@ -303,13 +309,13 @@ export default function VaultChecklist({ onNavigateToStatements = null }) {
               <h3 className="text-xl font-bold text-white uppercase tracking-widest">{data.year} Statement Status Grid</h3>
             </div>
             <p className="text-xs text-white/40 font-mono italic pl-9">
-              Verified blocks represent reconciled statements. Glow badge indicates PDF present in library.
+              Checkmarks are legacy checklist status, not balance reconciliation evidence. Glow indicates a catalog PDF.
             </p>
           </div>
           <div className="flex items-center gap-4 text-xs font-mono text-white/40">
             <div className="flex items-center gap-1.5">
               <span className="w-3 h-3 rounded bg-emerald-500 border border-emerald-400 inline-block"></span>
-              <span>Reconciled</span>
+              <span>Legacy checked</span>
             </div>
             <div className="flex items-center gap-1.5">
               <span className="w-3 h-3 rounded bg-white/5 border border-cyan-500 inline-block"></span>
@@ -369,11 +375,11 @@ export default function VaultChecklist({ onNavigateToStatements = null }) {
 
                       let cellTitle = `${inst.institution} - ${months[mIdx]}: `;
                       if (isComplete && hasPdf) {
-                        cellTitle += `Reconciled & PDF Archived (${targetPdf.filename}). Click to toggle reconcile, Shift+Click or double-click to view PDF.`;
+                        cellTitle += `Legacy checked & PDF archived (${targetPdf.filename}). Click to toggle legacy check, Shift+Click or double-click to view PDF.`;
                       } else if (isComplete && !hasPdf) {
-                        cellTitle += 'Reconciled (No PDF detected in catalog). Click to toggle.';
+                        cellTitle += 'Legacy checked (No PDF detected in catalog). Click to toggle.';
                       } else if (!isComplete && hasPdf) {
-                        cellTitle += `PDF Available (${targetPdf.filename}), awaiting reconciliation. Click to mark reconciled.`;
+                        cellTitle += `PDF Available (${targetPdf.filename}), not balance evidence. Click to toggle legacy check.`;
                       } else {
                         cellTitle += 'Pending statement. Click to toggle status.';
                       }

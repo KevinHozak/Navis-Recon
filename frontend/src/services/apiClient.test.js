@@ -160,3 +160,23 @@ test('managed recovery APIs use exact native IPC mappings and reject desktop fal
     globalThis.window={}; await assert.rejects(getSyncOutcomes(),/requires the Tauri desktop shell/); await assert.rejects(reconcileLedgerSync(),/requires the Tauri desktop shell/); await assert.rejects(retryLedgerSync(ids),/requires the Tauri desktop shell/)
   } finally { if(hadWindow)globalThis.window=original;else delete globalThis.window }
 })
+
+
+test('checklist CAS and reconciliation use desktop IPC with exact string balances and explicit revisions', async () => {
+  const api = await import('./apiClient.js'); const had = Object.hasOwn(globalThis, 'window'); const old = globalThis.window; const calls = []
+  try {
+    globalThis.window = { __TAURI_INTERNALS__: { invoke: async (command, args) => { calls.push({ command, args }); return { revision: 'new' } } } }
+    await api.saveVaultChecklist({ revision: 'old', year: 2026, statements: [] })
+    const draft = { account: 'Assets:Cash', closing_balance: '0.000000000000000001' }
+    await api.compareReconciliation(draft); await api.saveReconciliation(draft, 'snapshot'); await api.getReconciliations()
+    assert.deepEqual(calls, [
+      { command: 'save_vault_checklist', args: { payload: { year: 2026, statements: [] }, expectedRevision: 'old' } },
+      { command: 'compare_reconciliation', args: { draft } },
+      { command: 'save_reconciliation', args: { draft, expectedRevision: 'snapshot' } },
+      { command: 'get_reconciliations', args: {} },
+    ])
+    delete globalThis.window
+    await assert.rejects(api.saveVaultChecklist({ revision: 'old' }), /Tauri desktop shell/)
+    await assert.rejects(api.getReconciliations(), /Tauri desktop shell/)
+  } finally { if (had) globalThis.window = old; else delete globalThis.window }
+})

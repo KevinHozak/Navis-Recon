@@ -41,21 +41,15 @@ export function ping() {
 }
 
 export function getVaultChecklist() {
-  return request('/api/vault/checklist', {
-    ipcCommand: 'get_vault_checklist',
-    ipcArgs: {},
-  })
+  return desktopRequest('get_vault_checklist', {})
 }
-
 export function saveVaultChecklist(payload) {
-  return request('/api/vault/checklist', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-    ipcCommand: 'save_vault_checklist',
-    ipcArgs: { payload },
-  })
+  const { revision, ...document } = payload
+  return desktopRequest('save_vault_checklist', { payload: document, expectedRevision: revision })
 }
+export function getReconciliations() { return desktopRequest('get_reconciliations', {}) }
+export function saveReconciliation(draft, expectedRevision) { return desktopRequest('save_reconciliation', { draft, expectedRevision }) }
+export function compareReconciliation(draft) { return desktopRequest('compare_reconciliation', { draft }) }
 
 export function getPendingLedger() {
   return request('/api/ledger/pending', {

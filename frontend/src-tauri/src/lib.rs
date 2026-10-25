@@ -1,10 +1,12 @@
 mod checklist;
 mod config;
+mod document_store;
 mod ledger_parser;
 mod ledger_review;
 mod managed_import;
 mod money;
 mod obligations;
+mod reconciliation;
 mod records;
 mod review_audit;
 mod statements;
@@ -31,6 +33,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             checklist::get_vault_checklist,
             checklist::save_vault_checklist,
+            reconciliation::get_reconciliations,
+            reconciliation::save_reconciliation,
+            reconciliation::compare_reconciliation,
             ledger_review::get_pending_ledger,
             ledger_review::get_ledger_categories,
             ledger_review::approve_ledger_transaction,

@@ -170,3 +170,8 @@ Analysis outcome is separate from lifecycle status. Exit code zero with matches 
 ### Managed sync import (RECON-S009)
 
 The external finance processor is analysis-only. Its observed legacy --commit lacks durable item identity and idempotency, so production commit IPC routes through the native managed importer. See [managed-sync-import.md](managed-sync-import.md) for the supported subset, required `sync_inbox_path` and `sync_counter_account` settings, private journal location, recovery and retry protocol, IPC argument shapes, and platform limits. Encrypted transforms and ambiguous interrupted operations fail closed for manual review.
+
+
+## Reconciliation and checklist persistence (RECON-E004)
+
+See [reconciliation policy and persistence](reconciliation.md). `reconciliation.rs` owns explicit account/period evidence, validated cutoff comparisons and status gates. `document_store.rs` supplies revision-checked JSON publication for reconciliation and the legacy checklist. The Statement Library opens the comparison workspace; existing month flags remain legacy status rather than evidence.

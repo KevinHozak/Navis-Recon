@@ -14,6 +14,7 @@ pub(crate) struct Posting {
 }
 #[derive(Debug, Clone)]
 pub(crate) struct Transaction {
+    pub(crate) flag: char,
     pub(crate) date: String,
     pub(crate) payee: String,
     pub(crate) narration: String,
@@ -440,7 +441,7 @@ pub(crate) fn parse_with_currency(
                 i += 1;
                 continue;
             }
-            if let Some((date, payee, narration, _flag)) = header(line) {
+            if let Some((date, payee, narration, flag)) = header(line) {
                 let start = i + 1;
                 let mut posts = vec![];
                 let mut sums: BTreeMap<String, Money> = BTreeMap::new();
@@ -544,6 +545,7 @@ pub(crate) fn parse_with_currency(
                 if errs.is_empty() {
                     tx_lines.push(start);
                     txs.push(Transaction {
+                        flag,
                         date,
                         payee,
                         narration,
@@ -778,6 +780,7 @@ pub(crate) fn parse_with_currency(
                     }
                     running.insert((pad.source.clone(), check.currency.clone()), source_total);
                     ordered.push(Transaction {
+                        flag: '*',
                         date: pad.date.clone(),
                         payee: String::new(),
                         narration: "(Beancount padding)".into(),
@@ -1559,6 +1562,7 @@ mod strict_subset_tests {
     fn history_carries_forward_empty_months() {
         let transactions = vec![
             Transaction {
+                flag: '*',
                 date: "2024-01-31".into(),
                 payee: "a".into(),
                 narration: "".into(),
@@ -1576,6 +1580,7 @@ mod strict_subset_tests {
                 ],
             },
             Transaction {
+                flag: '*',
                 date: "2024-03-02".into(),
                 payee: "b".into(),
                 narration: "".into(),
