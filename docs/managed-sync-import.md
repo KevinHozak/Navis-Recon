@@ -2,6 +2,32 @@
 
 ## External analyzer boundary
 
+### Local-only configured analysis (1.0.17)
+
+Sync embeds the repository-owned `analyzer_bridge.py` and launches it through the bounded native Python runner. It passes the canonical inbox from the same configuration snapshot used for managed import, the selected ledger currency, and `sync_rules_path`. If the rules path is empty, it locates `finances_renaming_rules.json` beside the legacy `harvester_script`; the legacy Python processor and its commit/AI functions are never executed. Python with `pypdf` remains a prerequisite. No Google client is imported and no statement text is sent to an external service.
+
+Optional `sync_ocr_enabled: "true"` enables installed local Poppler/Tesseract for empty-text pages among the first two pages. `sync_pdftoppm_path` and `sync_tesseract_path` select the executables. They render at 150 DPI in a disposable directory and run English OCR locally, with 45-second per-command limits inside the native runner's cancellable process tree. Temporary page images are removed after analysis. Missing executables, OCR failures and unreadable text are explicit diagnostics; no cloud fallback exists. OCR is off by default and never modifies a PDF or guesses missing rules.
+
+Institution/date rules retain `keywords`, `date_patterns`, `date_selection`, and `target_template`. Date parsing uses a pattern's captured date rather than its full labeled match. A pattern capturing multiple different dates is ambiguous and rejected. For an import candidate, the rule additionally needs explicit local extraction:
+
+```json
+"local_extraction": {
+  "amount_pattern": "Total:\\s+(-?[\\d,.]+)",
+  "category": "Expenses:Utilities",
+  "currency": "USD"
+}
+```
+
+The amount pattern must match exactly once with exactly one capture group. Amounts use exact decimal strings, category must be an Income/Expenses account, and the rule currency must match the configured unit. No amount, category, or conversion is guessed. Missing extraction rules, multiple totals, mismatched currency, encrypted PDFs and unsupported files remain unapproved with explicit diagnostics. Existing date/rename rules alone therefore do not authorize financial postings. Analysis only reads the configured inbox and rules; Rust retains all source identity checks, reviewer approval, archive/ledger mutation and durable recovery behavior.
+
+A rule may instead supply `review_only_reason`. After institution and date recognition, that rule emits an unmatched/manual-review diagnostic and cannot produce a candidate, even if it also contains `local_extraction`. Use this for split payroll or other multi-posting documents that the current single-category extractor cannot faithfully represent. A net deposit must not be classified as gross salary, and a historical statement already represented in the ledger must not be reimported. Keep household-specific rules in an ignored private file, such as `data/local-analysis-rules.json`, selected by `sync_rules_path`; shared legacy rules need not be modified.
+
+Review-only acceptance (2026-10-26, v1.0.18): inspection of the historical scanned fixture found a corresponding existing split payroll posting and an incorrect OCR net-pay digit. A private institution/check-date rule therefore routes that format to multi-posting review instead of guessing an amount/category. The packaged app recognized the correct check date, returned one review diagnostic and zero candidates/eligible IDs, and left the copied ledger hash and empty archive unchanged. The no-candidate terminal state is expected, with no analyzer errors. Eight analyzer regressions passed, including refusal even when a review-only rule contains an amount mapping. Production executable and installer metadata both verified as 1.0.18. No real household financial postings or shared legacy rules were changed.
+
+Packaged acceptance (2026-10-26): the actual 1.0.17 release analyzed a temporary inbox containing a synthetic text PDF and a copied historical scan. The configured synthetic local rule produced one eligible exact-decimal candidate; the locally OCR'd historical scan remained unmatched. Native reviewer-approved commit created one archive PDF and one balanced ledger append while preserving both inbox sources and all original ledger bytes. Repeating analysis/approval produced no second archive or append. After restarting the packaged executable, durable reconciliation reported the same single succeeded operation. The test config deliberately pointed `harvester_script` to a nonexistent file, proving the embedded adapter owned analysis. No external AI was used and the live household ledger matched its untouched smoke-test copy afterward.
+
+Validation: seven local analyzer regressions passed (including a real synthetic PDF through the embedded `-c` invocation), 106 frontend tests passed, ESLint passed, 185 native tests passed with one existing mounted-drive benchmark ignored, formatting/whitespace passed, and the production executable plus NSIS installer both verified as 1.0.17. Installer execution was not part of this pass. The historical scan still needs an institution/date rule and an explicit local amount/category mapping before it can be imported; OCR alone does not establish financial meaning.
+
 The observed legacy processor's `--analyze` output supplies candidate metadata. Its `--commit` can move or decrypt files, append logs and ledger text, and return generic process results. It does not supply durable per-item identities, source hash preconditions, idempotency, or recoverable outcomes. Navis-Recon does not invoke that commit path. No external processor code, credentials, private defaults, or household data are copied into this project.
 
 ## Approval and commit

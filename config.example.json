@@ -12,6 +12,10 @@
   "statements_path": "C:/Example/Statements",
   "statement_archive_path": "C:/Example/Statements",
   "sync_inbox_path": "C:/Example/Statements/Inbox",
+  "sync_rules_path": "C:/Example/finances_renaming_rules.json",
+  "sync_ocr_enabled": "false",
+  "sync_tesseract_path": "tesseract",
+  "sync_pdftoppm_path": "pdftoppm",
   "sync_counter_account": "Assets:Bank:Checking",
   "sync_analysis_timeout_seconds": "600",
   "harvester_script": "C:/Example/finance_processor.py"

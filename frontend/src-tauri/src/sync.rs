@@ -1483,16 +1483,43 @@ pub fn start_ledger_sync(app: AppHandle) -> Result<SyncRun, String> {
     c.configure_receipts();
     crate::sync_process::timeout_seconds(crate::config::get("sync_analysis_timeout_seconds"))?;
     let cfg = crate::managed_import::runtime_config()?;
+    let args = local_analysis_args(&cfg.inbox);
     let run = c.reserve_analysis(cfg)?;
     let id = run.run_id.clone().unwrap();
     publish_state(&app, &run);
     let program = "python".to_owned();
-    let args = vec![
-        crate::config::get("harvester_script").to_owned(),
-        "--analyze".into(),
-    ];
     tauri::async_runtime::spawn_blocking(move || analyze_worker(c, &app, &id, &program, &args));
     Ok(run)
+}
+
+fn local_analysis_args(inbox: &std::path::Path) -> Vec<String> {
+    let explicit = crate::config::get("sync_rules_path");
+    let rules = if explicit.is_empty() {
+        std::path::Path::new(crate::config::get("harvester_script"))
+            .with_file_name("finances_renaming_rules.json")
+    } else {
+        std::path::PathBuf::from(explicit)
+    };
+    let mut args = vec![
+        "-c".into(),
+        include_str!("analyzer_bridge.py").into(),
+        "--inbox".into(),
+        inbox.to_string_lossy().into_owned(),
+        "--rules".into(),
+        rules.to_string_lossy().into_owned(),
+        "--currency".into(),
+        crate::config::get("ledger_currency").into(),
+    ];
+    if crate::config::get("sync_ocr_enabled") == "true" {
+        args.extend([
+            "--ocr".into(),
+            "--tesseract".into(),
+            crate::config::get("sync_tesseract_path").into(),
+            "--pdftoppm".into(),
+            crate::config::get("sync_pdftoppm_path").into(),
+        ]);
+    }
+    args
 }
 
 #[tauri::command]
