@@ -107,9 +107,9 @@ function App() {
   };
 
   return (
-    <div className="min-h-screen bg-black flex overflow-hidden text-white">
+    <div className="relative h-screen bg-black flex overflow-hidden text-white">
       {/* Sidebar Navigation */}
-      <div className="w-64 border-r border-white/10 bg-zinc-950 flex flex-col">
+      <div className="w-64 shrink-0 min-h-0 border-r border-white/10 bg-zinc-950 flex flex-col">
         <div className="p-6 border-b border-white/10 flex items-center gap-3">
           <div className="w-10 h-10 bg-accent/10 border border-accent/40 rounded flex justify-center items-center text-xl shadow-[0_0_15px_rgba(0,212,255,0.2)]">
             🏛️
@@ -186,8 +186,8 @@ function App() {
       </div>
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col h-screen overflow-y-auto custom-scrollbar">
-        <div ref={contentRef} tabIndex={-1} aria-label={`${currentView} content`} className="p-12 mx-auto w-full xl:max-w-7xl 2xl:max-w-full outline-none">
+      <div className="flex-1 min-w-0 min-h-0 flex flex-col overflow-y-auto custom-scrollbar">
+        <div ref={contentRef} tabIndex={-1} aria-label={`${currentView} content`} className="shrink-0 p-12 mx-auto w-full xl:max-w-7xl 2xl:max-w-full outline-none">
           {currentView === 'overview' && <><AttentionPanel sources={attention} onNavigate={navigateAttention} onRefresh={() => void attentionRef.current?.refresh()} /><OverviewWidget onNavigateToReviews={() => setCurrentView('reviews')} /></>}
           <div hidden={currentView !== 'overview'}><MonthlyCloseWidget onNavigate={navigateAttention} /></div>
           

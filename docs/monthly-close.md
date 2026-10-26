@@ -1,5 +1,13 @@
 # Overview attention and monthly close
 
+## Packaged acceptance (2026-10-26, v1.0.16)
+
+The Windows release was exercised against a disposable copy of the configured ledger and a copied PDF. A labeled transaction in an isolated test unit provided deterministic opening/closing balances; the PDF served as test provenance, not a claim that its original contents described that synthetic account. Desktop UI checks passed approval with audit history, exact statement comparison and transaction matching, all four reconciliation statuses, monthly close, saved-scope reload after restart, and stale-close detection after changing only the copied PDF. Actual packaged IPC additionally rejected a close with changed evidence without modifying the summary, reopened it, and verified two retained history entries without ledger changes. No household source files were modified and no financial data or PDFs were added to Git.
+
+Acceptance exposed document overflow from the absolutely positioned screen-reader legend. The shell now provides its containing block and stays within the viewport, with independent content/sidebar scrolling. Final packaged verification, without injected styles, measured both viewport and document at 960 pixels; scrolling content to its limit and attempting document overscroll retained the sidebar at the top and document scroll at zero. Frontend checks: 106 tests passed, ESLint passed, production build passed; executable and NSIS installer metadata both matched 1.0.16. Installer execution and live harvesting were outside this acceptance pass.
+
+## Overview behavior
+
 The overview preserves signed native-unit balances. The allocation pie shows positive asset balances only, including cash and otherwise uncategorized assets. Its text table separately exposes negative offsets and reconciles them to signed total assets. A positive liability balance is a credit/refund; it is never turned into debt by taking an absolute value.
 
 Financial attention reads sync outcomes, statement sequence anomalies, pending ledger reviews, obligation alerts and expiration radar independently. Each source has its own successful-read timestamp and current, loading, unavailable or stale state. Failed refreshes retain visibly stale items. An empty queue is healthy only when every source read succeeded. Statement sequence gaps are catalog heuristics, not proof that every account has all statements. Buttons navigate to the corresponding institution, pending queue, import operation, renewal or record.

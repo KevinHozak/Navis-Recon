@@ -1836,7 +1836,7 @@ dependencies = [
 
 [[package]]
 name = "navis-recon"
-version = "1.0.15"
+version = "1.0.16"
 dependencies = [
  "serde",
  "serde_json",
