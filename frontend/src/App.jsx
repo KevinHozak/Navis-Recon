@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import LedgerReviewWidget from './components/LedgerReviewWidget'
 import OverviewWidget from './components/OverviewWidget'
 import CategoryDetailWidget from './components/CategoryDetailWidget'
@@ -8,8 +8,11 @@ import SubscriptionsWidget from './components/SubscriptionsWidget'
 import SyncWidget from './components/SyncWidget'
 import WealthDashboardWidget from './components/WealthDashboardWidget'
 import RecordsWidget from './components/RecordsWidget'
-import { ping, getPendingLedger, getRecurringObligations, getRecordsRadar, subscribeLedgerMutation, subscribeSyncResourceChanges } from './services/apiClient'
-import { createLatestRequestLoader } from './services/latestRequestLoader'
+import { ping, getPendingLedger, getRecurringObligations, getRecordsRadar, subscribeLedgerMutation, subscribeSyncResourceChanges, getStatementCatalog, getSyncAttention, listenForSyncEvents } from './services/apiClient'
+import { createAttentionController } from './services/attentionState'
+import { subscribeResourceChanges, invalidateResources } from './services/resourceChanges'
+import AttentionPanel from './components/AttentionPanel'
+import MonthlyCloseWidget from './components/MonthlyCloseWidget'
 import { createSyncResourceObserver } from './services/syncResourceObserver'
 import './index.css'
 
@@ -17,11 +20,20 @@ function App() {
   const [currentView, setCurrentView] = useState('overview');
   const [pendingCount, setPendingCount] = useState(null);
   const [ledgerGeneration, setLedgerGeneration] = useState(0);
-  const [statementGeneration, setStatementGeneration] = useState(0);
   const [alertObligationsCount, setAlertObligationsCount] = useState(null);
   const [recordsActionCount, setRecordsActionCount] = useState(0);
   const [desktopStatus, setDesktopStatus] = useState('checking');
   const [statementFilter, setStatementFilter] = useState(null);
+  const [attention, setAttention] = useState({});
+  const attentionRef = useRef(null);
+  const contentRef = useRef(null);
+  useEffect(() => { contentRef.current?.focus(); }, [currentView]);
+  const [attentionFilter, setAttentionFilter] = useState({});
+  const navigateAttention = (view, filters) => {
+    setAttentionFilter(filters);
+    if (view === 'statements') setStatementFilter(filters);
+    setCurrentView(view);
+  };
 
   const navigateToStatements = (filters = {}) => {
     setStatementFilter(filters);
@@ -34,9 +46,19 @@ function App() {
 
   useEffect(() => {
     let isMounted = true;
-    const pendingLoader = createLatestRequestLoader({ load: getPendingLedger, update: (value) => { if (isMounted) setPendingCount(value) }, map: (rows) => Array.isArray(rows) ? rows.length : null });
-    const obligationLoader = createLatestRequestLoader({ load: getRecurringObligations, update: (value) => { if (isMounted) setAlertObligationsCount(value) }, map: (rows) => Array.isArray(rows) ? rows.reduce((acc, curr) => acc + (curr.alerts ? curr.alerts.length : 0), 0) : null });
-    const recordsLoader = createLatestRequestLoader({ load: getRecordsRadar, update: (value) => { if (isMounted) setRecordsActionCount(value) }, map: (report) => report?.summary ? (report.summary.actionRequired || 0) : null });
+    const attentionController = createAttentionController({ loaders: { reviews: getPendingLedger, renewals: getRecurringObligations, records: getRecordsRadar, statements: getStatementCatalog, sync: getSyncAttention }, onChange: sources => {
+      if (!isMounted) return;
+      setAttention(sources);
+      setPendingCount(sources.reviews.status === 'current' ? sources.reviews.count : null);
+      setAlertObligationsCount(sources.renewals.status === 'current' ? sources.renewals.count : null);
+      setRecordsActionCount(sources.records.status === 'current' ? sources.records.count : null);
+    } });
+    attentionRef.current = attentionController;
+    const refreshAttention = () => { void attentionController.refresh(); };
+    const stopResources = subscribeResourceChanges(ids => { void attentionController.refresh(ids); });
+    const eventAbort = new AbortController();
+    const stopTerminal = listenForSyncEvents({ done: refreshAttention }, { signal: eventAbort.signal });
+    window.addEventListener('focus', refreshAttention);
 
     ping()
       .then(() => {
@@ -46,34 +68,26 @@ function App() {
         if (isMounted) setDesktopStatus('offline');
       });
 
-    const updatePendingCount = () => pendingLoader.refresh();
-    const updateObligationAlerts = () => obligationLoader.refresh();
-    const updateRecordsRadarCount = () => recordsLoader.refresh();
-
-    updatePendingCount();
-    updateObligationAlerts();
-    updateRecordsRadarCount();
-    const unsubscribeLedgerMutation = subscribeLedgerMutation(() => { setLedgerGeneration((value) => value + 1); updatePendingCount(); updateObligationAlerts(); updateRecordsRadarCount(); });
+    refreshAttention();
+    const unsubscribeLedgerMutation = subscribeLedgerMutation(() => { setLedgerGeneration(value => value + 1); });
     const observer = createSyncResourceObserver({ subscribe: subscribeSyncResourceChanges, snapshot: async () => {
       const { getSyncRun } = await import('./services/apiClient'); return getSyncRun()
     }, onEffects: () => {
       if (!isMounted) return;
-      setLedgerGeneration(value => value + 1); setStatementGeneration(value => value + 1);
-      updatePendingCount(); updateObligationAlerts(); updateRecordsRadarCount();
+      setLedgerGeneration(value => value + 1);
+      invalidateResources(['reviews', 'renewals', 'statements', 'sync']);
     }, onError: error => console.error('Unable to observe completed imports:', error) });
     observer.connect();
-    // Refresh count every 10 seconds to keep sidebar accurate
-    const interval = setInterval(() => {
-      updatePendingCount();
-      updateObligationAlerts();
-      updateRecordsRadarCount();
-    }, 10000);
+    const interval = setInterval(refreshAttention, 60_000);
     return () => {
       isMounted = false;
       observer.dispose();
-      pendingLoader.dispose();
-      obligationLoader.dispose();
-      recordsLoader.dispose();
+      attentionController.dispose();
+      attentionRef.current = null;
+      stopResources();
+      eventAbort.abort();
+      void stopTerminal.then(stop => stop()).catch(() => {});
+      window.removeEventListener('focus', refreshAttention);
       unsubscribeLedgerMutation();
       clearInterval(interval);
     };
@@ -173,8 +187,9 @@ function App() {
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col h-screen overflow-y-auto custom-scrollbar">
-        <div className="p-12 mx-auto w-full xl:max-w-7xl 2xl:max-w-full">
-          {currentView === 'overview' && <OverviewWidget key={ledgerGeneration} onNavigateToReviews={() => setCurrentView('reviews')} />}
+        <div ref={contentRef} tabIndex={-1} aria-label={`${currentView} content`} className="p-12 mx-auto w-full xl:max-w-7xl 2xl:max-w-full outline-none">
+          {currentView === 'overview' && <><AttentionPanel sources={attention} onNavigate={navigateAttention} onRefresh={() => void attentionRef.current?.refresh()} /><OverviewWidget onNavigateToReviews={() => setCurrentView('reviews')} /></>}
+          <div hidden={currentView !== 'overview'}><MonthlyCloseWidget onNavigate={navigateAttention} /></div>
           
           {currentView === 'wealth' && (
             <div className="h-full">
@@ -190,19 +205,19 @@ function App() {
 
           {currentView === 'records' && (
             <div className="h-full">
-              <RecordsWidget />
+              <RecordsWidget initialFilter={attentionFilter} />
             </div>
           )}
 
           {currentView === 'subscriptions' && (
             <div className="h-full">
-              <SubscriptionsWidget key={ledgerGeneration} />
+              <SubscriptionsWidget initialFilter={attentionFilter} />
             </div>
           )}
 
           {currentView === 'statements' && (
             <div className="h-full">
-              <StatementLibraryWidget key={statementGeneration}
+              <StatementLibraryWidget
                 initialFilter={statementFilter} 
                 onNavigateToChecklist={navigateToChecklist} 
               />
@@ -211,7 +226,7 @@ function App() {
 
           {currentView === 'checklist' && (
             <div className="bg-zinc-900/50 rounded-lg border border-white/5 shadow-2xl h-full">
-              <VaultChecklist key={statementGeneration}
+              <VaultChecklist
                 onNavigateToStatements={navigateToStatements} 
               />
             </div>
@@ -219,7 +234,7 @@ function App() {
 
           {currentView === 'sync' && (
             <div className="h-full">
-              <SyncWidget />
+              <SyncWidget initialFilter={attentionFilter} />
             </div>
           )}
 

@@ -180,3 +180,7 @@ See [reconciliation policy and persistence](reconciliation.md). `reconciliation.
 ## Household analysis (RECON-E005)
 
 See [history, movement and cash-scenario policy](household-analysis.md). The Wealth view exposes explicit period comparisons and source-transaction drill-down; the Subscriptions view adds selected-liquid-account scenarios built on the existing obligation detector. `household_analysis.rs` owns snapshot validation, exact decomposition and forecast/settings contracts.
+
+## Actionable overview and monthly close (RECON-E006)
+
+See [attention, account scope and private close evidence](monthly-close.md). The overview presents signed allocation coverage and independent attention-source freshness. Shared resource invalidation connects persisted actions to attention and badges. `monthly_close.rs` validates full-period reconciliation coverage and saves private, revision-bound close/reopen history without modifying the ledger or publishing summaries remotely.

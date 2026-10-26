@@ -1,6 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
 import {
-  getRecords,
   getRecordsRadar,
   saveRecord,
   deleteRecord,
@@ -30,7 +29,7 @@ const RECURRENCE_OPTIONS = [
   { value: 'semi_annual', label: 'Semi-Annual (6 Months)' },
 ];
 
-export default function RecordsWidget() {
+export default function RecordsWidget({ initialFilter = {} }) {
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -38,6 +37,7 @@ export default function RecordsWidget() {
   // Filters & Tabs
   const [activeTab, setActiveTab] = useState('all'); // 'all' | 'action' | 'category' | 'owner'
   const [searchTerm, setSearchTerm] = useState('');
+  const [recordId, setRecordId] = useState(initialFilter.recordId || null);
   const [selectedCategory, setSelectedCategory] = useState('ALL');
   const [selectedOwner, setSelectedOwner] = useState('ALL');
 
@@ -69,30 +69,7 @@ export default function RecordsWidget() {
       setReport(data);
     } catch (err) {
       console.error('Failed to load records radar:', err);
-      // Fallback: try loading plain records if radar report fails
-      try {
-        const rawRecords = await getRecords();
-        setReport({
-          summary: {
-            total: rawRecords.length,
-            expired: 0,
-            critical: 0,
-            upcoming: 0,
-            healthy: rawRecords.length,
-            actionRequired: 0,
-          },
-          items: rawRecords.map((r) => ({
-            record: r,
-            bucket: 'healthy',
-            daysUntilExpiration: null,
-            nextRenewalDate: null,
-            isActionRequired: false,
-          })),
-          asOfDate: new Date().toISOString().split('T')[0],
-        });
-      } catch {
-        setError(err?.message || String(err) || 'Failed to load household records');
-      }
+      setError(err?.message || String(err) || 'Failed to load household records');
     } finally {
       setLoading(false);
     }
@@ -123,6 +100,7 @@ export default function RecordsWidget() {
     if (!report?.items) return [];
 
     return report.items.filter(({ record, isActionRequired }) => {
+      if (recordId && record.id !== recordId) return false;
       // Tab filtering
       if (activeTab === 'action' && !isActionRequired) return false;
       if (activeTab === 'category' && selectedCategory !== 'ALL' && record.category !== selectedCategory) {
@@ -147,7 +125,7 @@ export default function RecordsWidget() {
 
       return true;
     });
-  }, [report, activeTab, selectedCategory, selectedOwner, searchTerm]);
+  }, [report, activeTab, selectedCategory, selectedOwner, searchTerm, recordId]);
 
   // Modal Handlers
   function openCreateModal() {
@@ -312,6 +290,7 @@ export default function RecordsWidget() {
 
   return (
     <div className="space-y-8 animate-fadeIn">
+      {recordId && <button type="button" onClick={() => setRecordId(null)} className="text-accent underline">Showing selected record · Show all records</button>}
       {/* Top Header & Actions */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-6 border-b border-white/10">
         <div>

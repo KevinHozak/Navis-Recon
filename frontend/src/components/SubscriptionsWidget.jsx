@@ -1,22 +1,24 @@
+import { subscribeResourceChanges } from '../services/resourceChanges';
 import CashForecastWidget from './CashForecastWidget'
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { getRecurringObligations, saveSubscriptionMetadata } from '../services/apiClient';
 import { addMoney, formatMoney, multiplyDivideMoney } from '../utils/money';
 
-export default function SubscriptionsWidget() {
+export default function SubscriptionsWidget({ initialFilter = {} }) {
+  const loadGeneration = useRef(0);
   const [obligations, setObligations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [selectedCurrency, setSelectedCurrency] = useState('USD');
+  const [selectedCurrency, setSelectedCurrency] = useState(initialFilter.currency || 'USD');
   const currencies = [...new Set(obligations.map(ob => ob.currency || ob.metadata?.currency || 'USD'))];
   const currency = currencies.includes(selectedCurrency) ? selectedCurrency : (currencies.includes('USD') ? 'USD' : currencies[0]);
   const activeObligations = obligations.filter(ob => (ob.currency || ob.metadata?.currency || 'USD') === currency && !(ob.metadata?.forecast_cancelled ?? ob.metadata?.extra?.forecast_cancelled));
 
   // Filters & Search
-  const [searchTerm, setSearchTerm] = useState('');
+  const [searchTerm, setSearchTerm] = useState(initialFilter.search || '');
   const [filterCadence, setFilterCadence] = useState('ALL');
-  const [filterAlertOnly, setFilterAlertOnly] = useState(false);
-  const [filterAccount, setFilterAccount] = useState('ALL');
+  const [filterAlertOnly, setFilterAlertOnly] = useState(Boolean(initialFilter.alertsOnly));
+  const [filterAccount, setFilterAccount] = useState(initialFilter.account || 'ALL');
 
   // Metadata Edit Modal / Drawer
   const [editingItem, setEditingItem] = useState(null);
@@ -34,23 +36,29 @@ export default function SubscriptionsWidget() {
   const [editCustomLabel, setEditCustomLabel] = useState('');
   const [editIsReviewed, setEditIsReviewed] = useState(false);
 
-  async function loadData() {
-    setLoading(true);
+  async function loadData(background = false) {
+    const generation = ++loadGeneration.current;
+    if (!background) setLoading(true);
     setError(null);
     try {
       const data = await getRecurringObligations();
-      setObligations(Array.isArray(data) ? data : []);
+      if (generation !== loadGeneration.current) return;
+      if (!Array.isArray(data)) throw new Error('Recurring obligation source is malformed');
+      setObligations(data);
     } catch (err) {
       console.error('Failed to load obligations:', err);
-      setError(err?.message || String(err) || 'Failed to load recurring obligations');
+      if (generation === loadGeneration.current) setError(err?.message || String(err) || 'Failed to load recurring obligations');
     } finally {
-      setLoading(false);
+      if (generation === loadGeneration.current) setLoading(false);
     }
   }
 
   useEffect(() => {
+    const requests = loadGeneration;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadData();
+    const stop = subscribeResourceChanges(ids => { if (ids.has('renewals')) void loadData(true); });
+    return () => { requests.current++; stop(); };
   }, []);
 
   // Compute aggregate metrics
@@ -388,7 +396,7 @@ export default function SubscriptionsWidget() {
         <div className="flex items-center gap-3">
           <button
             type="button"
-            onClick={loadData}
+            onClick={() => void loadData()}
             disabled={loading}
             className="flex items-center gap-2 px-4 py-2 bg-zinc-900 border border-white/10 hover:border-accent/40 rounded text-xs font-bold uppercase tracking-widest text-white transition-all hover:bg-white/5 disabled:opacity-50"
           >
@@ -545,7 +553,7 @@ export default function SubscriptionsWidget() {
           <p className="text-xs text-red-300/70 font-mono">{error}</p>
           <button
             type="button"
-            onClick={loadData}
+            onClick={() => void loadData()}
             className="px-4 py-2 bg-red-900/40 hover:bg-red-900/60 text-red-200 border border-red-500/30 rounded text-xs uppercase font-bold tracking-wider"
           >
             Retry

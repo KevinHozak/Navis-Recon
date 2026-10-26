@@ -16,7 +16,7 @@ Opening/closing balances are manually transcribed and reviewed by the user. Amou
 
 Differences are statement minus ledger. Reconciled status requires both supplied differences to be exactly zero and every cleared transaction in the period explicitly matched. Pending flags `!` and `P` are disclosed and block completion; there is no rounding tolerance or explanation-based override. Cleared matches are user assertions, not automatic PDF transaction extraction. Account transactions outside the period remain visible as timing candidates and cannot be selected as in-period matches. Transfers are labeled candidates rather than hidden or treated as expenses. Match IDs include the exact ledger revision, so stale selections must be cleared and reviewed again.
 
-Each save reevaluates the current ledger while holding an exclusive source read handle and the evidence PDF handle, then publishes JSON only. Reads flag previously reconciled records stale if source revision or PDF identity changed or became unreadable; Refresh records rechecks freshness. The UI does not claim continuously monitored evidence. A stale record must be compared/reviewed again. Record summaries consider every explicit mapping for a statement; one reconciled account cannot hide another unresolved account.
+Each save reevaluates the current ledger while holding source and PDF read handles that deny writes/deletion but permit concurrent financial-view reads, then publishes JSON only. Reads flag previously reconciled records stale if source revision or PDF identity changed or became unreadable; Refresh records rechecks freshness. The UI does not claim continuously monitored evidence. A stale record must be compared/reviewed again. Record summaries consider every explicit mapping for a statement; one reconciled account cannot hide another unresolved account.
 
 ## Persistence and conflicts
 
@@ -24,7 +24,7 @@ Checklist and reconciliation JSON use a raw-byte SHA-256 revision, a cooperative
 
 The checklist UI serializes saves and retains its last persisted checkmarks until the response/readback succeeds. Failure leaves the persisted value visible with an explicit error; Refresh reloads the current document before a retry. The reconciliation form retains a clearly marked unsaved edit on failure; Refresh records explicitly reloads persisted values and discards that unsaved edit. Navigation suppresses late responses; backend revision checks still apply if a save completes after navigation. There is no automatic retry of ambiguous saves.
 
-The lock coordinates Navis-Recon writers. Noncooperating external editors do not honor it: observed changes before either compare are rejected, but no filesystem-wide CAS or cross-file power-loss atomicity is claimed. Ledger/PDF exclusive read handles prevent ordinary competing writers during final evaluation on Windows. Failed atomic publication leaves prior JSON unchanged. Filesystem, schema and readback failures remain explicit.
+The lock coordinates Navis-Recon writers. Noncooperating external editors do not honor it: observed changes before either compare are rejected, but no filesystem-wide CAS or cross-file power-loss atomicity is claimed. Ledger/PDF write-denying read handles prevent ordinary competing writers during final evaluation on Windows. Failed atomic publication leaves prior JSON unchanged. Filesystem, schema and readback failures remain explicit.
 
 ## Verification
 

@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { cancelSyncRun, commitLedgerSync, getSyncRun, getSyncReceipts, getSyncOutcomes, reconcileLedgerSync, retryLedgerSync, revealSyncSource, isDesktopRuntime, listenForSyncEvents, startLedgerSync } from '../services/apiClient'
 import { createSyncRunController } from '../services/syncRunController'
-import { canAbandonReview, canCommitReview, canStartRun, canToggleMatch, managedOutcomes, retryableManagedItems, showsReview } from '../services/syncRunView'
+import { canAbandonReview, canCommitReview, canStartRun, canToggleMatch, managedOutcomes, retryableManagedItems, filterRecoveryOutcomes, showsReview } from '../services/syncRunView'
 
 const empty = { status: 'idle', logs: [], matches: [], unmatched: [], errors: [] }
 const displayText = value => ['string', 'number', 'boolean'].includes(typeof value) ? String(value) : ''
-const SyncWidget = () => {
+const SyncWidget = ({ initialFilter = {} }) => {
   const [view, setView] = useState({ run: null, pending: false, ready: false })
   const scrollRef = useRef(null)
   const controllerRef = useRef(null)
@@ -26,7 +26,9 @@ const SyncWidget = () => {
 
   const selected = view.selectedIds || new Set()
   const outcomes = view.recovery || managedOutcomes(run)
-  const safeOutcomes = retryableManagedItems(outcomes)
+  const [recoveryFilter, setRecoveryFilter] = useState(initialFilter.operationId || (initialFilter.recoveryOnly ? 'attention' : 'all'));
+  const filteredOutcomes = filterRecoveryOutcomes(outcomes, recoveryFilter);
+  const safeOutcomes = retryableManagedItems(filteredOutcomes)
 
   const start = () => controllerRef.current?.start()
   const commit = () => {
@@ -60,7 +62,8 @@ const SyncWidget = () => {
         {safeOutcomes.length > 0 && <button onClick={() => controllerRef.current?.retryOutcomes()} disabled={!view.ready || view.pending || (run.run_id && !terminal && status !== 'idle')} className="px-3 py-2 rounded bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 disabled:opacity-40">{view.pending ? 'Retryingâ€¦' : `Retry ${safeOutcomes.length} safe items`}</button>}
       </div></div>
       {view.recoveryError && <div className="text-red-300" role="alert">Unable to refresh recovery outcomes: {displayText(view.recoveryError.message) || 'Unknown recovery error'}</div>}
-      {outcomes.length === 0 ? <div className="text-white/40 text-sm">No managed import outcomes recorded.</div> : <div className="space-y-2">{outcomes.map((item, index) => <div key={`${item.operation_id || item.item_id}-${index}`} className={`p-3 rounded border ${item.state === 'succeeded' ? 'border-green-500/20 bg-green-500/5 text-green-300' : item.state === 'uncertain' ? 'border-amber-500/30 bg-amber-500/5 text-amber-200' : 'border-red-500/20 bg-red-500/5 text-red-300'}`}><div className="font-medium">{displayText(item.filename) || 'Statement'} â€” {displayText(item.state)}</div><div className="text-xs opacity-70 mt-1">{displayText(item.message)}</div>{item.state === 'uncertain' && <div className="text-xs mt-1">Manual review required.</div>}{['failed','uncertain'].includes(item.state) && item.operation_id && <button type="button" disabled={!view.ready || view.pending || run.cancelling} onClick={()=>controllerRef.current?.revealSource({sourceRef:`src:${item.operation_id}`,operationId:item.operation_id})} className="mt-2 text-xs underline disabled:opacity-40">Show file</button>}</div>)}</div>}
+      <button type="button" onClick={() => setRecoveryFilter(recoveryFilter === 'all' ? 'attention' : 'all')} className="text-xs text-accent underline">{recoveryFilter === 'all' ? 'Show failed or uncertain only' : 'Show all outcomes'}</button>
+      {filteredOutcomes.length === 0 ? <div className="text-white/40 text-sm">No managed import outcomes in the current view.</div> : <div className="space-y-2">{filteredOutcomes.map((item, index) => <div key={`${item.operation_id || item.item_id}-${index}`} className={`p-3 rounded border ${item.state === 'succeeded' ? 'border-green-500/20 bg-green-500/5 text-green-300' : item.state === 'uncertain' ? 'border-amber-500/30 bg-amber-500/5 text-amber-200' : 'border-red-500/20 bg-red-500/5 text-red-300'}`}><div className="font-medium">{displayText(item.filename) || 'Statement'} â€” {displayText(item.state)}</div><div className="text-xs opacity-70 mt-1">{displayText(item.message)}</div>{item.state === 'uncertain' && <div className="text-xs mt-1">Manual review required.</div>}{['failed','uncertain'].includes(item.state) && item.operation_id && <button type="button" disabled={!view.ready || view.pending || run.cancelling} onClick={()=>controllerRef.current?.revealSource({sourceRef:`src:${item.operation_id}`,operationId:item.operation_id})} className="mt-2 text-xs underline disabled:opacity-40">Show file</button>}</div>)}</div>}
     </section>
     <div className="flex-1 bg-zinc-950 rounded-lg border border-white/10 shadow-2xl overflow-hidden flex flex-col">
       {(status === 'idle' || status === 'analyzing' || status === 'failed' || status === 'cancelled') && <div className="flex-1 flex flex-col font-mono text-sm">

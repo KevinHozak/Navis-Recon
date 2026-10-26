@@ -6,6 +6,10 @@
   --accent: #00d4ff;
 }
 
+@theme inline {
+  --color-accent: var(--accent);
+}
+
 body {
   color: var(--foreground);
   background-color: var(--background);

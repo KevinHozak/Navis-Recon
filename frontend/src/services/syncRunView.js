@@ -17,4 +17,6 @@ export function validManagedOutcomes(items) {
 export const managedOutcomes = run => Array.isArray(run?.managed_outcomes) && validManagedOutcomes(run.managed_outcomes) ? run.managed_outcomes : []
 export const retryableManagedItems = source => managedOutcomes(Array.isArray(source) ? { managed_outcomes: source } : source).filter(item => item.state === 'failed' && item.retry_safe && typeof item.operation_id === 'string')
 
+export const filterRecoveryOutcomes = (items, filter) => items.filter(item => filter === 'all' || (filter === 'attention' ? item.state !== 'succeeded' : (item.operation_id || item.item_id) === filter))
+
 export const sanitizeManagedOutcomes = items => items.map(({ item_id, filename, state, retry_safe, message, operation_id = null }) => ({ item_id, filename, state, retry_safe, message, operation_id }))

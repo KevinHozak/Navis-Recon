@@ -1370,6 +1370,28 @@ fn commit_worker(
     }
 }
 
+pub(crate) fn monthly_close_outcomes() -> Vec<crate::managed_import::ItemOutcome> {
+    let mut outcomes = get_sync_outcomes();
+    if matches!(coordinator().snapshot().status, Phase::Failed) {
+        outcomes.push(crate::managed_import::ItemOutcome {
+            item_id: "failed_run".into(),
+            filename: "Latest sync run".into(),
+            state: "failed".into(),
+            retry_safe: false,
+            message: "Resolve the failed sync run and inspect diagnostics before closing".into(),
+            operation_id: None,
+        });
+    }
+    outcomes
+}
+
+pub(crate) fn monthly_close_busy() -> bool {
+    matches!(
+        coordinator().snapshot().status,
+        Phase::Analyzing | Phase::Review | Phase::Committing
+    )
+}
+
 #[tauri::command]
 pub fn get_sync_run() -> SyncRun {
     coordinator().snapshot()

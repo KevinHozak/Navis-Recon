@@ -2,6 +2,24 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { approveLedgerTransaction, getLedgerApprovalHistory, undoLedgerApproval, subscribeLedgerMutation, getLedgerSourceState, getLedgerSummary, getPendingLedger, startLedgerSync, commitLedgerSync, cancelSyncRun, getSyncOutcomes, reconcileLedgerSync, retryLedgerSync, revealSyncSource, registerSyncEventListeners } from './apiClient.js'
 
+test('monthly close sends explicit scope and both evidence/document revisions through native-only IPC', async () => {
+  const { getMonthlyClose, saveMonthlyClose } = await import('./apiClient.js');
+  const originalWindow = globalThis.window;
+  const hadWindow = Object.hasOwn(globalThis, 'window');
+  const calls = [];
+  const request = { month: '2026-09', currency: 'USD', accounts: ['Assets:Bank:Example'], exceptions: [] };
+  const response = { metrics: [{ spending: '0.000000000000000001' }] };
+  try {
+    globalThis.window = { __TAURI_INTERNALS__: { invoke: async (command, args) => { calls.push({ command, args }); return response; } } };
+    assert.equal((await getMonthlyClose(request)).metrics[0].spending, '0.000000000000000001');
+    await saveMonthlyClose(request, 'document-revision', 'evidence-revision', 'closed');
+    assert.deepEqual(calls, [{ command: 'get_monthly_close', args: { request } }, { command: 'save_monthly_close', args: { request, expectedRevision: 'document-revision', expectedEvidence: 'evidence-revision', action: 'closed' } }]);
+    globalThis.window = {};
+    await assert.rejects(getMonthlyClose(request), /desktop shell/);
+    await assert.rejects(saveMonthlyClose(request, 'revision', 'proof', 'closed'), /desktop shell/);
+  } finally { if (hadWindow) globalThis.window = originalWindow; else delete globalThis.window; }
+});
+
 test('ledger API client preserves Tauri arguments and exact summary provenance at IPC boundary', async () => {
   const hadWindow = Object.hasOwn(globalThis, 'window')
   const originalWindow = globalThis.window

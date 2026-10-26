@@ -1,3 +1,4 @@
+import { persistedAction, invalidateResources } from './resourceChanges.js'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 
@@ -43,12 +44,12 @@ export function ping() {
 export function getVaultChecklist() {
   return desktopRequest('get_vault_checklist', {})
 }
-export function saveVaultChecklist(payload) {
+function rawsaveVaultChecklist(payload) {
   const { revision, ...document } = payload
   return desktopRequest('save_vault_checklist', { payload: document, expectedRevision: revision })
 }
 export function getReconciliations() { return desktopRequest('get_reconciliations', {}) }
-export function saveReconciliation(draft, expectedRevision) { return desktopRequest('save_reconciliation', { draft, expectedRevision }) }
+function rawsaveReconciliation(draft, expectedRevision) { return desktopRequest('save_reconciliation', { draft, expectedRevision }) }
 export function compareReconciliation(draft) { return desktopRequest('compare_reconciliation', { draft }) }
 
 export function getPendingLedger() {
@@ -85,7 +86,7 @@ export function undoLedgerApproval(recordId) {
 
 const mutationListeners = new Set()
 export function subscribeLedgerMutation(listener) { mutationListeners.add(listener); return () => mutationListeners.delete(listener) }
-export function invalidateLedgerViews() { for (const listener of mutationListeners) { try { listener() } catch (error) { console.error('Ledger mutation subscriber failed:', error) } } }
+export function invalidateLedgerViews() { invalidateResources(['reviews', 'renewals']); for (const listener of mutationListeners) { try { listener() } catch (error) { console.error('Ledger mutation subscriber failed:', error) } } }
 
 function desktopRequest(command, args) {
   if (!isDesktopRuntime()) return Promise.reject(new Error('Audited ledger review requires the Tauri desktop shell.'))
@@ -145,7 +146,7 @@ export function getSyncRun() {
   return invoke('get_sync_run')
 }
 
-export function commitLedgerSync(runId, payload) {
+function rawcommitLedgerSync(runId, payload) {
   if (!isDesktopRuntime()) return Promise.reject(new Error('Ledger sync requires the Tauri desktop shell.'))
   return invoke('commit_ledger_sync', { runId, payload })
 }
@@ -173,12 +174,17 @@ export function getSyncOutcomes() {
   return invoke('get_sync_outcomes')
 }
 
-export function reconcileLedgerSync() {
+export async function getSyncAttention() {
+  const [outcomes, run] = await Promise.all([getSyncOutcomes(), getSyncRun()]);
+  return { outcomes, run };
+}
+
+function rawreconcileLedgerSync() {
   if (!isDesktopRuntime()) return Promise.reject(new Error('Managed import recovery requires the Tauri desktop shell.'))
   return invoke('reconcile_ledger_sync')
 }
 
-export function retryLedgerSync(operationIds) {
+function rawretryLedgerSync(operationIds) {
   if (!isDesktopRuntime()) return Promise.reject(new Error('Managed import recovery requires the Tauri desktop shell.'))
   if (!Array.isArray(operationIds) || operationIds.some(id => typeof id !== 'string' || !/^[a-f0-9]{64}$/i.test(id))) return Promise.reject(new Error('Retry requires valid durable operation IDs.'))
   return invoke('retry_ledger_sync', { operationIds })
@@ -254,7 +260,7 @@ export function getSubscriptionRegistry() {
   })
 }
 
-export function saveSubscriptionMetadata(metadata) {
+function rawsaveSubscriptionMetadata(metadata) {
   if (isDesktopRuntime()) {
     return invoke('save_subscription_metadata', { metadata })
   }
@@ -274,7 +280,7 @@ export function getRecords() {
   })
 }
 
-export function saveRecord(record) {
+function rawsaveRecord(record) {
   if (isDesktopRuntime()) {
     return invoke('save_record', { record })
   }
@@ -287,7 +293,7 @@ export function saveRecord(record) {
   })
 }
 
-export function deleteRecord(id) {
+function rawdeleteRecord(id) {
   if (isDesktopRuntime()) {
     return invoke('delete_record', { id })
   }
@@ -322,4 +328,25 @@ export { API_BASE }
 
 export function getHouseholdAnalysis(request) { return desktopRequest('get_household_analysis', { request }) }
 export function getCashForecast(request) { return desktopRequest('get_cash_forecast', { request }) }
-export function saveForecastSettings(settings, expectedRevision) { return desktopRequest('save_forecast_settings', { settings, expectedRevision }) }
+function rawsaveForecastSettings(settings, expectedRevision) { return desktopRequest('save_forecast_settings', { settings, expectedRevision }) }
+
+export function saveVaultChecklist(...args) { return persistedAction(["statements"], () => rawsaveVaultChecklist(...args)) }
+
+export function saveReconciliation(...args) { return persistedAction(["statements"], () => rawsaveReconciliation(...args)) }
+
+export function saveSubscriptionMetadata(...args) { return persistedAction(["renewals"], () => rawsaveSubscriptionMetadata(...args)) }
+
+export function saveRecord(...args) { return persistedAction(["records"], () => rawsaveRecord(...args)) }
+
+export function deleteRecord(...args) { return persistedAction(["records"], () => rawdeleteRecord(...args)) }
+
+export function saveForecastSettings(...args) { return persistedAction(["renewals"], () => rawsaveForecastSettings(...args)) }
+
+export function getMonthlyClose(request) { return desktopRequest('get_monthly_close', { request }) }
+export function saveMonthlyClose(request, expectedRevision, expectedEvidence, action) { return persistedAction(['close'], () => desktopRequest('save_monthly_close', { request, expectedRevision, expectedEvidence, action })) }
+
+export function commitLedgerSync(...args) { return persistedAction(["sync"], () => rawcommitLedgerSync(...args)) }
+
+export function retryLedgerSync(...args) { return persistedAction(["sync"], () => rawretryLedgerSync(...args)) }
+
+export function reconcileLedgerSync(...args) { return persistedAction(["sync"], () => rawreconcileLedgerSync(...args)) }

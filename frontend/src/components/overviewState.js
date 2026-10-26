@@ -82,7 +82,7 @@ export function createOverviewController({ loadSummary, checkSource, onChange })
     if (disposed) return
     const thisGeneration = ++generation
     checkingGeneration = null
-    publish({ summary: null, loading: true, error: null, source: 'unknown', sourceError: null, sourceChecking: false, sourceStale: false })
+    publish({ loading: true, error: null, source: 'unknown', sourceError: null, sourceChecking: false, sourceStale: Boolean(state.summary) })
     try {
       const summary = await loadSummary()
       if (disposed || thisGeneration !== generation) return

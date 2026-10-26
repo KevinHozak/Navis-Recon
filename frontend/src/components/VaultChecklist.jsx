@@ -1,3 +1,4 @@
+import { subscribeResourceChanges } from '../services/resourceChanges';
 import { createDocumentSaver } from '../services/documentSaver'
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion } from 'framer-motion';
@@ -19,10 +20,10 @@ export default function VaultChecklist({ onNavigateToStatements = null }) {
   } }));
   const [openingPath, setOpeningPath] = useState(null);
 
-  async function loadData() {
+  async function loadData(background = false) {
     if (saver.isBusy()) return;
     const generation = ++loadGeneration.current;
-    setLoading(true);
+    if (!background) setLoading(true);
     setActionError(null);
     try {
       const [checklistJson, catalogJson] = await Promise.all([
@@ -51,13 +52,20 @@ export default function VaultChecklist({ onNavigateToStatements = null }) {
     }
   }
 
+  useEffect(() => subscribeResourceChanges(ids => {
+    if (ids.has('sync')) void loadData(true);
+    // The saver is stable; resource notifications must not replace an active save.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), []);
+
   const saveChecklist = updatedData => { loadGeneration.current++; return saver.save(updatedData); };
   useEffect(() => {
+    const requests = loadGeneration;
     saver.activate();
     // Initial external document load; the saver owns all persisted UI updates.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadData();
-    return () => saver.dispose();
+    return () => { requests.current++; saver.dispose(); };
     // loadData deliberately uses the stable saver instance.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saver]);
@@ -141,7 +149,7 @@ export default function VaultChecklist({ onNavigateToStatements = null }) {
     );
   }
 
-  if (!data) return <div role="alert" className="text-red-300 p-6">{actionError || 'Error loading checklist data.'} <button type="button" className="underline ml-3" onClick={loadData}>Refresh checklist</button></div>;
+  if (!data) return <div role="alert" className="text-red-300 p-6">{actionError || 'Error loading checklist data.'} <button type="button" className="underline ml-3" onClick={() => void loadData()}>Refresh checklist</button></div>;
 
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -164,7 +172,7 @@ export default function VaultChecklist({ onNavigateToStatements = null }) {
         </div>
         {actionError && (
           <div className="mt-2 px-4 py-2 bg-red-500/10 border border-red-500/30 rounded text-red-300 text-xs font-mono">
-            {actionError} <button type="button" disabled={saving} onClick={loadData} className="underline ml-3">Refresh persisted checklist</button>
+            {actionError} <button type="button" disabled={saving} onClick={() => void loadData()} className="underline ml-3">Refresh persisted checklist</button>
           </div>
         )}
       </div>

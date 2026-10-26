@@ -75,7 +75,7 @@ pub struct Snapshot {
     pub records: Vec<Record>,
     pub stale_ids: Vec<String>,
 }
-fn private_path() -> Result<PathBuf, String> {
+pub(crate) fn private_path() -> Result<PathBuf, String> {
     let base =
         std::env::var_os("LOCALAPPDATA").ok_or("Private reconciliation store unavailable")?;
     let ledger =
@@ -116,6 +116,10 @@ fn read_doc(path: &Path) -> Result<(Document, String), String> {
     }
     Ok((doc, rev))
 }
+pub(crate) fn records_for_close(path: &Path) -> Result<(Vec<Record>, String), String> {
+    let (doc, revision) = read_doc(path)?;
+    Ok((doc.records, revision))
+}
 fn validate(d: &Draft) -> Result<(), String> {
     if !ledger_parser::valid_date(&d.period_start)
         || !ledger_parser::valid_date(&d.period_end)
@@ -150,13 +154,16 @@ fn record_id(statement: &str, d: &Draft) -> String {
         .as_bytes(),
     )
 }
-fn locked_read(path: &Path) -> Result<(File, Vec<u8>), String> {
+pub(crate) fn locked_read(path: &Path) -> Result<(File, Vec<u8>), String> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        options.share_mode(0);
+        // Other financial views may read the same stable bytes. Deny write and
+        // delete access until evidence publication finishes, without making our
+        // own pending-review/catalog reads report a false unavailable source.
+        options.share_mode(1);
     }
     let mut f = options
         .open(path)
@@ -168,7 +175,7 @@ fn locked_read(path: &Path) -> Result<(File, Vec<u8>), String> {
     f.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
     Ok((f, bytes))
 }
-fn evidence(d: &Draft, root: &Path) -> Result<(File, String, String), String> {
+pub(crate) fn evidence(d: &Draft, root: &Path) -> Result<(File, String, String), String> {
     crate::managed_import::reject_reparse_ancestry(root)?;
     crate::managed_import::reject_reparse_ancestry(Path::new(&d.statement_path))?;
     let root = fs::canonicalize(root).map_err(|_| "Statement archive unavailable")?;
@@ -191,7 +198,7 @@ fn evidence(d: &Draft, root: &Path) -> Result<(File, String, String), String> {
             .into_owned(),
     ))
 }
-fn compare_bytes(d: &Draft, bytes: &[u8]) -> Result<Comparison, String> {
+pub(crate) fn compare_bytes(d: &Draft, bytes: &[u8]) -> Result<Comparison, String> {
     validate(d)?;
     let text = std::str::from_utf8(bytes).map_err(|_| "Ledger is not UTF-8")?;
     let txs = ledger_parser::parse_with_currency(text, &d.currency)
@@ -314,7 +321,7 @@ pub fn compare_reconciliation(draft: Draft) -> Result<Comparison, String> {
     let (_ledger, bytes) = locked_read(Path::new(crate::config::get("ledger_path")))?;
     compare_bytes(&draft, &bytes)
 }
-fn save_at(
+pub(crate) fn save_at(
     path: &Path,
     ledger: &Path,
     root: &Path,

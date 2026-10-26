@@ -1,7 +1,20 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createSyncRunController as makeSyncRunController, createSelectionStore } from './syncRunController.js'
-import { canAbandonReview, canCommitReview, canStartRun, canToggleMatch, managedOutcomes, retryableManagedItems, showsReview } from './syncRunView.js'
+import { canAbandonReview, canCommitReview, canStartRun, canToggleMatch, managedOutcomes, retryableManagedItems, filterRecoveryOutcomes, showsReview } from './syncRunView.js'
+
+test('filtered import recovery never retries hidden operations and keeps uncertain items read-only', () => {
+  const rows = [
+    {item_id:'one',filename:'one.pdf',state:'failed',retry_safe:true,message:'safe retry',operation_id:'a'.repeat(64)},
+    {item_id:'two',filename:'two.pdf',state:'failed',retry_safe:true,message:'safe retry',operation_id:'b'.repeat(64)},
+    {item_id:'three',filename:'three.pdf',state:'uncertain',retry_safe:false,message:'review',operation_id:'c'.repeat(64)},
+    {item_id:'four',filename:'four.pdf',state:'succeeded',retry_safe:false,message:'done',operation_id:'d'.repeat(64)},
+  ];
+  assert.deepEqual(retryableManagedItems(filterRecoveryOutcomes(rows,'a'.repeat(64))).map(row=>row.item_id), ['one']);
+  assert.deepEqual(retryableManagedItems(filterRecoveryOutcomes(rows,'c'.repeat(64))), []);
+  assert.equal(filterRecoveryOutcomes(rows,'attention').length,3);
+  assert.equal(filterRecoveryOutcomes(rows,'all').length,4);
+});
 
 const deferred = () => { let resolve, reject; const promise = new Promise((r, j) => { resolve = r; reject = j }); return { promise, resolve, reject } }
 const snapshot = (run_id, revision, status = 'idle') => ({ run_id, revision, sequence: revision, status, analysis_outcome: status === 'review' || status === 'committing' || status === 'complete' ? 'success' : status === 'failed' || status === 'cancelled' ? 'failed' : null, logs: [], matches: [], unmatched: [], errors: [], result: null })

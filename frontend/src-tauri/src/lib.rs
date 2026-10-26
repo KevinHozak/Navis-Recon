@@ -6,6 +6,7 @@ mod ledger_parser;
 mod ledger_review;
 mod managed_import;
 mod money;
+mod monthly_close;
 mod obligations;
 mod reconciliation;
 mod records;
@@ -37,6 +38,8 @@ pub fn run() {
             reconciliation::get_reconciliations,
             reconciliation::save_reconciliation,
             reconciliation::compare_reconciliation,
+            monthly_close::get_monthly_close,
+            monthly_close::save_monthly_close,
             ledger_review::get_pending_ledger,
             ledger_review::get_ledger_categories,
             ledger_review::approve_ledger_transaction,

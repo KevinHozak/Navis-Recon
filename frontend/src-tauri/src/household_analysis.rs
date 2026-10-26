@@ -109,7 +109,11 @@ fn net(tx: &Transaction, unit: &str) -> Money {
         })
         .fold(Money::default(), |a, p| a + p.amount)
 }
-fn analyze(txs: &[Transaction], revision: String, r: RangeRequest) -> Result<Analysis, String> {
+pub(crate) fn analyze(
+    txs: &[Transaction],
+    revision: String,
+    r: RangeRequest,
+) -> Result<Analysis, String> {
     date_range(&r.start, &r.end)?;
     if !ledger_parser::valid_currency(&r.currency) {
         return Err("Invalid currency/unit".into());

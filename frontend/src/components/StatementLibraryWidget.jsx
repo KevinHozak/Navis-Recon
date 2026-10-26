@@ -1,9 +1,11 @@
+import { subscribeResourceChanges } from '../services/resourceChanges';
 import ReconciliationWorkspace from './ReconciliationWorkspace'
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { getStatementCatalog, openStatementFile, getVaultChecklist } from '../services/apiClient';
 import { findBestInstitutionMatch } from '../utils/institutionMatching';
 
 export default function StatementLibraryWidget({ initialFilter = null, onNavigateToChecklist = null }) {
+  const loadGeneration = useRef(0);
   const [catalog, setCatalog] = useState(null);
   const [checklist, setChecklist] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -19,8 +21,9 @@ export default function StatementLibraryWidget({ initialFilter = null, onNavigat
   const [selectedYear, setSelectedYear] = useState(initialFilter?.year || 'ALL');
   const [selectedStatus, setSelectedStatus] = useState(initialFilter?.status || 'ALL'); // ALL, CANONICAL, NON_CANONICAL, UNREVIEWED, ANOMALY
 
-  async function loadData() {
-    setLoading(true);
+  async function loadData(background = false) {
+    const generation = ++loadGeneration.current;
+    if (!background) setLoading(true);
     setError(null);
     setOpenError(null);
     try {
@@ -34,19 +37,23 @@ export default function StatementLibraryWidget({ initialFilter = null, onNavigat
           return null;
         }),
       ]);
+      if (generation !== loadGeneration.current) return;
       setCatalog(catalogData);
       setChecklist(checklistData);
     } catch (err) {
-      setError(err?.message || String(err) || "Failed to load statement catalog");
+      if (generation === loadGeneration.current) setError(err?.message || String(err) || "Failed to load statement catalog");
     } finally {
-      setLoading(false);
+      if (generation === loadGeneration.current) setLoading(false);
     }
   }
 
   useEffect(() => {
+    const requests = loadGeneration;
     // Load external statement catalog and checklist on mount
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadData();
+    const stop = subscribeResourceChanges(ids => { if (ids.has('statements')) void loadData(true); });
+    return () => { requests.current++; stop(); };
   }, []);
 
   useEffect(() => {
@@ -79,7 +86,7 @@ export default function StatementLibraryWidget({ initialFilter = null, onNavigat
     if (!catalog?.statements) {
       return { institutions: [], years: [] };
     }
-    const instSet = new Set();
+    const instSet = new Set((catalog.anomalies || []).map(anomaly => anomaly.institution).filter(Boolean));
     const yearSet = new Set();
 
     catalog.statements.forEach(stmt => {
@@ -216,7 +223,7 @@ export default function StatementLibraryWidget({ initialFilter = null, onNavigat
         <p className="text-sm text-white/70 font-mono">{error}</p>
         <button
           type="button"
-          onClick={loadData}
+          onClick={() => void loadData()}
           className="px-4 py-2 bg-red-500/20 hover:bg-red-500/40 text-red-300 border border-red-500/40 rounded text-xs uppercase font-bold tracking-widest transition-all"
         >
           Retry Scan
@@ -225,7 +232,7 @@ export default function StatementLibraryWidget({ initialFilter = null, onNavigat
     );
   }
 
-  const anomalies = catalog?.anomalies || [];
+  const anomalies = (catalog?.anomalies || []).filter(anomaly => selectedInstitution === 'ALL' || anomaly.institution === selectedInstitution);
   const totalStatements = catalog?.total_count || 0;
   const canonicalCount = catalog?.canonical_count || 0;
   const nonCanonicalCount = totalStatements - canonicalCount;
@@ -268,7 +275,7 @@ export default function StatementLibraryWidget({ initialFilter = null, onNavigat
           )}
           <button
             type="button"
-            onClick={loadData}
+            onClick={() => void loadData()}
             title="Refresh statement index"
             className="p-2.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-white/70 hover:text-cyan-400 transition-all"
           >
