@@ -6,6 +6,90 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct BatchMatch {
+    pub id: String,
+    pub peer_match_id: String,
+    pub filename: String,
+    pub date: String,
+    pub merchant: String,
+    pub amount: String,
+    pub currency: String,
+    pub days_apart: i64,
+    pub merchant_overlap: bool,
+}
+
+pub(crate) fn batch_candidates(
+    items: &[(String, Value)],
+    currency: &str,
+) -> Result<std::collections::HashMap<String, Vec<BatchMatch>>, String> {
+    if items.len() > 1000 {
+        return Err("Batch exceeds 1000 receipts; analyze a smaller inbox".into());
+    }
+    let mut rows = Vec::new();
+    for (id, item) in items {
+        let amount = Money::parse(
+            item["amount"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| item["amount"].as_number().map(ToString::to_string))
+                .as_deref()
+                .ok_or("Missing batch amount")?,
+        )?;
+        let day = day_number(item["date"].as_str().ok_or("Missing batch date")?)?;
+        rows.push((
+            id,
+            item,
+            amount,
+            day,
+            item["category"]
+                .as_str()
+                .is_some_and(|c| c.starts_with("Income:")),
+        ));
+    }
+    let mut found = std::collections::HashMap::<String, Vec<BatchMatch>>::new();
+    for (id, item, amount, day, income) in &rows {
+        if amount.is_zero() {
+            continue;
+        }
+        for (peer, other, other_amount, other_day, other_income) in &rows {
+            if id == peer
+                || amount != other_amount
+                || income != other_income
+                || (day - other_day).abs() > 7
+            {
+                continue;
+            }
+            let digest = Sha256::digest(format!("batch\0{id}\0{peer}").as_bytes());
+            let matches = found.entry((*id).clone()).or_default();
+            matches.push(BatchMatch {
+                id: digest.iter().map(|b| format!("{b:02x}")).collect(),
+                peer_match_id: (*peer).clone(),
+                filename: other["filename"]
+                    .as_str()
+                    .ok_or("Missing peer filename")?
+                    .into(),
+                date: other["date"].as_str().ok_or("Missing peer date")?.into(),
+                merchant: other["rule"].as_str().unwrap_or("Statement").into(),
+                amount: amount.to_string(),
+                currency: currency.into(),
+                days_apart: (day - other_day).abs(),
+                merchant_overlap: !merchant_words(item["rule"].as_str().unwrap_or(""))
+                    .is_disjoint(&merchant_words(other["rule"].as_str().unwrap_or(""))),
+            });
+            if matches.len() > 100 {
+                return Err(
+                    "A receipt has more than 100 batch overlaps; analyze a smaller inbox".into(),
+                );
+            }
+        }
+    }
+    for matches in found.values_mut() {
+        matches.sort_by(|a, b| a.id.cmp(&b.id));
+    }
+    Ok(found)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct DuplicateMatch {
     pub id: String,
     pub date: String,
@@ -168,6 +252,72 @@ pub(crate) fn candidates(
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn batch_matches_distinct_documents_and_legitimate_equal_payments_without_assuming_equivalence()
+    {
+        let row = |filename: &str, date: &str, amount: &str, merchant: &str| json!({"filename":filename,"date":date,"amount":amount,"rule":merchant,"category":"Expenses:Medical"});
+        let items = vec![
+            (
+                "a".into(),
+                row("original.pdf", "2026-01-01", "12.340", "Example Clinic"),
+            ),
+            (
+                "b".into(),
+                row("copy.pdf", "2026-01-01", "12.34", "Example Clinic"),
+            ),
+            (
+                "c".into(),
+                row("other.pdf", "2026-01-08", "12.34", "Other Vendor"),
+            ),
+            (
+                "refund".into(),
+                row("refund.pdf", "2026-01-01", "-12.34", "Example Clinic"),
+            ),
+            (
+                "different".into(),
+                row("different.pdf", "2026-01-01", "12.35", "Example Clinic"),
+            ),
+            (
+                "late".into(),
+                row("late.pdf", "2026-01-16", "12.34", "Example Clinic"),
+            ),
+        ];
+        let found = batch_candidates(&items, "USD").unwrap();
+        assert_eq!(found["a"].len(), 2);
+        assert!(found["a"]
+            .iter()
+            .any(|m| m.peer_match_id == "b" && m.merchant_overlap));
+        assert!(found["a"]
+            .iter()
+            .any(|m| m.peer_match_id == "c" && !m.merchant_overlap && m.days_apart == 7));
+        assert!(!found.contains_key("refund"));
+        assert!(!found.contains_key("different"));
+        assert!(!found.contains_key("late"));
+        let mut changed = items.clone();
+        changed[1].0 = "new-run-b".into();
+        let next = batch_candidates(&changed, "USD").unwrap();
+        assert_ne!(
+            found["a"]
+                .iter()
+                .find(|m| m.filename == "copy.pdf")
+                .unwrap()
+                .id,
+            next["a"]
+                .iter()
+                .find(|m| m.filename == "copy.pdf")
+                .unwrap()
+                .id
+        );
+        let excessive = (0..102)
+            .map(|i| {
+                (
+                    i.to_string(),
+                    row(&format!("{i}.pdf"), "2026-01-01", "1.00", "Vendor"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(batch_candidates(&excessive, "USD").is_err());
+    }
     #[test]
     fn exact_signed_units_split_expenses_and_calendar_window_are_required() {
         let ledger=concat!(

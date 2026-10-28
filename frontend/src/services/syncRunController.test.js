@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createSyncRunController as makeSyncRunController, createSelectionStore } from './syncRunController.js'
+import { createSyncRunController as makeSyncRunController, createSelectionStore, batchReviewContext, archiveSelectionConflict } from './syncRunController.js'
 import { canAbandonReview, canCommitReview, canStartRun, canToggleMatch, managedOutcomes, retryableManagedItems, filterRecoveryOutcomes, showsReview } from './syncRunView.js'
 
 test('filtered import recovery never retries hidden operations and keeps uncertain items read-only', () => {
@@ -54,6 +54,30 @@ const event = run => ({ run_id: run.run_id, revision: run.revision, sequence: ru
 const createSyncRunController = options => makeSyncRunController({ selectionStore: createSelectionStore(), ...options })
 
 const possibleDuplicate = (id='a'.repeat(64)) => ({id,date:'2026-01-01',payee:'Example Pharmacy',narration:'Ledger payment',amount:'12.34',currency:'USD',funding_accounts:['Assets:Bank:Checking'],days_apart:0,merchant_overlap:true})
+const batchPeer=(peer,id)=>({id:id.repeat(64),peer_match_id:peer,filename:peer+'.pdf',date:'2026-01-01',merchant:'Vendor',amount:'12.34',currency:'USD',days_apart:0,merchant_overlap:true})
+
+test('batch overlaps require acknowledgement on every selected receipt and bind the final subset and funding', async()=>{
+ const store=createSelectionStore(),calls=[]
+ const review={...snapshot('batch',1,'review'),funding_accounts:['Assets:Bank:Checking','Assets:HSA'],eligible_match_ids:['a','b'],matches:[{match_id:'a',filename:'a.pdf',new_name:'a.pdf',possible_batch_duplicates:[batchPeer('b','a')]},{match_id:'b',filename:'b.pdf',new_name:'b.pdf',possible_batch_duplicates:[batchPeer('a','b')]}]}
+ const api={listenForSyncEvents:async()=>()=>{},getSyncRun:async()=>review,commitLedgerSync:async(id,payload)=>{calls.push(payload);return {...review,revision:2,sequence:2,status:'committing'}}}
+ let c=makeSyncRunController({api,selectionStore:store});await c.connect();c.assignFunding('a','Assets:Bank:Checking');c.assignFunding('b','Assets:Bank:Checking')
+ assert.equal(await c.commit(['a','b']),false);c.decideBatch('a','import_reviewed');assert.equal(await c.commit(['a','b']),false)
+ c.decideBatch('b','import_reviewed');c.assignFunding('b','Assets:HSA');assert.equal(await c.commit(['a','b']),false)
+ c.decideBatch('a','import_reviewed');c.decideBatch('b','import_reviewed');c.toggle('b');assert.equal(await c.commit(['a']),false)
+ c.toggle('b');c.decideBatch('a','import_reviewed');c.decideBatch('b','import_reviewed');c.dispose();c=makeSyncRunController({api,selectionStore:store});await c.connect()
+ assert.equal(await c.commit(['a','b']),true)
+ const context=JSON.stringify([['a','Assets:Bank:Checking'],['b','Assets:HSA']]);assert.equal(calls[0][0].batchReviewContext,context);assert.equal(calls[0][1].batchDecision,'import_reviewed');c.dispose()
+})
+
+test('skipping one copy leaves the kept receipt blocked until reviewed and shared archive names are selection-scoped',async()=>{
+ const store=createSelectionStore();const review={...snapshot('copies',1,'review'),eligible_match_ids:['a','b'],matches:[{match_id:'a',filename:'a.pdf',new_name:'same.pdf',possible_batch_duplicates:[batchPeer('b','a')]},{match_id:'b',filename:'b.pdf',new_name:'SAME.pdf',possible_batch_duplicates:[batchPeer('a','b')]}]}
+ let calls=0;const c=makeSyncRunController({selectionStore:store,api:{listenForSyncEvents:async()=>()=>{},getSyncRun:async()=>review,commitLedgerSync:async()=>{calls++;return {...review,revision:2,sequence:2,status:'committing'}}}})
+ await c.connect();c.assignFunding('a','Assets:Bank:Checking');c.assignFunding('b','Assets:Bank:Checking');assert(archiveSelectionConflict(review,new Set(['a','b'])))
+ c.decideBatch('a','import_reviewed');c.decideBatch('b','import_reviewed');assert.equal(await c.commit(['a','b']),false)
+ c.decideBatch('b','skip');assert.equal(store.values(review).has('b'),false);assert.equal(await c.commit(['a']),false)
+ c.decideBatch('a','import_reviewed');assert.equal(store.batchDecisions(review).get('a').context,batchReviewContext(['a'],store.funding(review)))
+ assert.equal(await c.commit(['a']),true);assert.equal(calls,1);c.dispose()
+})
 
 test('possible duplicates require an explicit decision, skip deselects, and changed funding resets review', async () => {
   const store=createSelectionStore(); const calls=[]

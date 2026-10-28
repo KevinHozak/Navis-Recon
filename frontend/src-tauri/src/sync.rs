@@ -71,6 +71,10 @@ pub struct FundingSelection {
     funding_account: String,
     #[serde(default)]
     duplicate_decision: Option<String>,
+    #[serde(default)]
+    batch_decision: Option<String>,
+    #[serde(default)]
+    batch_review_context: Option<String>,
 }
 
 impl Default for SyncRun {
@@ -431,18 +435,39 @@ impl Coordinator {
             .iter()
             .map(|item| item.match_id.clone())
             .collect();
+        check_archive_selection(&run, &ids)?;
+        let overlaps = batch_for_run(&run, &plans)?;
+        let mut context_rows = selections
+            .iter()
+            .map(|s| (s.match_id.clone(), s.funding_account.clone()))
+            .collect::<Vec<_>>();
+        context_rows.sort();
+        let review_context =
+            serde_json::to_string(&context_rows).map_err(|_| "Unable to bind batch review")?;
         let selected = selections
             .iter()
             .map(|selection| {
-                let plan = plans
+                let mut plan = plans
                     .get(&selection.match_id)
                     .cloned()
                     .ok_or("A selected match has no valid analysis-time prepared plan")?;
+                plan.set_batch_duplicates(
+                    overlaps
+                        .get(&selection.match_id)
+                        .cloned()
+                        .unwrap_or_default(),
+                );
                 let assigned =
                     crate::managed_import::assign_funding(plan, &cfg, &selection.funding_account)?;
                 let assigned = crate::managed_import::decide_duplicates(
                     assigned,
                     selection.duplicate_decision.as_deref(),
+                )?;
+                let assigned = crate::managed_import::decide_batch(
+                    assigned,
+                    selection.batch_decision.as_deref(),
+                    selection.batch_review_context.as_deref(),
+                    &review_context,
                 )?;
                 Ok::<_, String>((selection.match_id.clone(), assigned))
             })
@@ -468,6 +493,32 @@ impl Coordinator {
         run.sequence += 1;
         run.revision += 1;
         Ok((run.clone(), selected, cfg))
+    }
+
+    fn refresh_batch_review(&self, id: &str) {
+        let mut run = self.current.lock().unwrap();
+        if run.run_id.as_deref() != Some(id) || run.status != Phase::Analyzing {
+            return;
+        }
+        let mut plans = self.plans.lock().unwrap();
+        match batch_for_run(&run, &plans) {
+            Ok(matches) => {
+                for item in &mut run.matches {
+                    let key = item["match_id"].as_str().unwrap_or("").to_owned();
+                    let peers = matches.get(&key).cloned().unwrap_or_default();
+                    item["possible_batch_duplicates"] = json!(peers);
+                    if let Some(plan) = plans.get_mut(&key) {
+                        plan.set_batch_duplicates(peers);
+                    }
+                }
+            }
+            Err(message) => run
+                .errors
+                .push(json!({"message":message,"protocol_error":true})),
+        }
+        refresh_eligible(&mut run);
+        run.revision += 1;
+        run.sequence += 1;
     }
     #[cfg(test)]
     fn approved_config(&self) -> Result<crate::managed_import::ImportConfig, String> {
@@ -668,6 +719,11 @@ fn strip_worker_identity(value: &mut Value) {
                     "possible_duplicates",
                     "duplicate_decision",
                     "duplicateDecision",
+                    "possible_batch_duplicates",
+                    "batchDecision",
+                    "batch_decision",
+                    "batchReviewContext",
+                    "batch_review_context",
                 ]
                 .contains(&key.as_str())
         });
@@ -700,6 +756,41 @@ fn valid_match(value: &Value) -> bool {
             .is_some_and(crate::managed_import::safe_name)
 }
 
+fn batch_for_run(
+    run: &SyncRun,
+    plans: &HashMap<String, crate::managed_import::PreparedPlan>,
+) -> Result<HashMap<String, Vec<crate::sync_duplicates::BatchMatch>>, String> {
+    let items = run
+        .matches
+        .iter()
+        .filter_map(|item| {
+            let id = item["match_id"].as_str()?;
+            (run.eligible_match_ids.iter().any(|v| v == id)
+                && plans.get(id).is_some_and(|p| !p.already_imported()))
+            .then(|| (id.to_owned(), item.clone()))
+        })
+        .collect::<Vec<_>>();
+    crate::sync_duplicates::batch_candidates(&items, &run.currency)
+}
+
+fn check_archive_selection(run: &SyncRun, ids: &[String]) -> Result<(), String> {
+    let mut names = HashSet::new();
+    for id in ids {
+        let item = run
+            .matches
+            .iter()
+            .find(|m| m["match_id"] == *id)
+            .ok_or("Unknown selected receipt")?;
+        let name = item["new_name"]
+            .as_str()
+            .ok_or("Invalid selected archive name")?;
+        if !names.insert(name.to_lowercase()) {
+            return Err("Selected receipts share an archive name; skip copies or use distinct archive names for separate payments".into());
+        }
+    }
+    Ok(())
+}
+
 fn refresh_eligible(run: &mut SyncRun) {
     if run.errors.iter().any(|item| {
         item.get("protocol_error").and_then(Value::as_bool) == Some(true)
@@ -722,13 +813,9 @@ fn refresh_eligible(run: &mut SyncRun) {
         .filter_map(|item| item.get("filename").and_then(Value::as_str))
         .collect();
     let mut counts = std::collections::HashMap::<String, usize>::new();
-    let mut destination_counts = std::collections::HashMap::<String, usize>::new();
     for item in &run.matches {
         if let Some(filename) = item.get("filename").and_then(Value::as_str) {
             *counts.entry(filename.to_lowercase()).or_default() += 1;
-        }
-        if let Some(name) = item.get("new_name").and_then(Value::as_str) {
-            *destination_counts.entry(name.to_lowercase()).or_default() += 1;
         }
     }
     run.eligible_match_ids = run
@@ -736,12 +823,9 @@ fn refresh_eligible(run: &mut SyncRun) {
         .iter()
         .filter_map(|item| {
             let filename = item.get("filename")?.as_str()?;
-            let destination = item.get("new_name")?.as_str()?;
             let id = item.get("match_id")?.as_str()?;
-            (!blocked.contains(filename)
-                && counts.get(&filename.to_lowercase()) == Some(&1)
-                && destination_counts.get(&destination.to_lowercase()) == Some(&1))
-            .then(|| id.to_owned())
+            (!blocked.contains(filename) && counts.get(&filename.to_lowercase()) == Some(&1))
+                .then(|| id.to_owned())
         })
         .collect();
 }
@@ -1210,6 +1294,7 @@ fn analyze_worker(
         );
         return;
     }
+    c.refresh_batch_review(id);
     let snapshot = c.snapshot();
     let global_error = snapshot.errors.iter().any(|e| {
         e.get("protocol_error").and_then(Value::as_bool) == Some(true)
@@ -2292,6 +2377,8 @@ mod tests {
                     match_id,
                     funding_account: "Assets:Bank:Checking".into(),
                     duplicate_decision: None,
+                    batch_decision: None,
+                    batch_review_context: None,
                 }],
             )
             .unwrap();
@@ -2530,5 +2617,91 @@ print('received:' + str(len(data)))
             .any(|r| r.terminal_state == "cancelled" && r.operation_kind == "analysis"));
         assert!(c.snapshot().receipt_id.is_some());
         assert_ne!(first, c.snapshot().receipt_id);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn batch_overlap_decisions_bind_selection_and_allow_one_copy_or_explicitly_separate_payments() {
+        for same_destination in [true, false] {
+            let temp = TempDir::new();
+            let (cfg, inbox, ledger) = test_import_config(&temp.0, "batch-review");
+            fs::write(inbox.join("a.pdf"), b"receipt a").unwrap();
+            fs::write(inbox.join("b.pdf"), b"receipt b different document").unwrap();
+            let c = Coordinator::default();
+            let id = c.reserve_analysis(cfg.clone()).unwrap().run_id.unwrap();
+            for (filename, name, merchant) in [
+                ("a.pdf", "same.pdf", "Example Clinic"),
+                (
+                    "b.pdf",
+                    if same_destination {
+                        "same.pdf"
+                    } else {
+                        "other.pdf"
+                    },
+                    "Other Vendor",
+                ),
+            ] {
+                c.event(&id,"match",json!({"filename":filename,"new_name":name,"date":"2026-10-23","rule":merchant,"category":"Expenses:Food","amount":"12.34","was_encrypted":false,"is_cleared":false})).unwrap();
+            }
+            c.refresh_batch_review(&id);
+            c.transition(&id, Phase::Review).unwrap();
+            let run = c.snapshot();
+            assert_eq!(run.eligible_match_ids.len(), 2);
+            assert_eq!(
+                run.matches[0]["possible_batch_duplicates"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+            let a = run.matches[0]["match_id"].as_str().unwrap().to_owned();
+            let b = run.matches[1]["match_id"].as_str().unwrap().to_owned();
+            let selection = |match_id: String| FundingSelection {
+                match_id,
+                funding_account: "Assets:Bank:Checking".into(),
+                duplicate_decision: None,
+                batch_decision: None,
+                batch_review_context: None,
+            };
+            let mut picked = vec![selection(a.clone())];
+            if !same_destination {
+                picked.push(selection(b.clone()));
+            }
+            let baseline = fs::read(&ledger).unwrap();
+            assert!(c.begin_managed_commit(&id, &picked).is_err());
+            assert_eq!(c.snapshot().status, Phase::Review);
+            for item in &mut picked {
+                item.batch_decision = Some("import_reviewed".into());
+                item.batch_review_context = Some("stale selection".into());
+            }
+            assert!(c.begin_managed_commit(&id, &picked).is_err());
+            let mut rows = picked
+                .iter()
+                .map(|s| (s.match_id.clone(), s.funding_account.clone()))
+                .collect::<Vec<_>>();
+            rows.sort();
+            let context = serde_json::to_string(&rows).unwrap();
+            for item in &mut picked {
+                item.batch_review_context = Some(context.clone());
+            }
+            if same_destination {
+                let mut both = picked.clone();
+                both.push(selection(b));
+                assert!(c.begin_managed_commit(&id, &both).is_err());
+            }
+            let (_, plans, bound) = c.begin_managed_commit(&id, &picked).unwrap();
+            let outcomes = crate::managed_import::commit_prepared(plans, &id, bound);
+            assert!(
+                outcomes.iter().all(|o| o.state == "succeeded"),
+                "{outcomes:?}"
+            );
+            let after = fs::read(&ledger).unwrap();
+            assert!(after.starts_with(&baseline));
+            assert_eq!(
+                String::from_utf8_lossy(&after)
+                    .matches("navis_recon_import")
+                    .count(),
+                if same_destination { 1 } else { 2 }
+            );
+        }
     }
 }

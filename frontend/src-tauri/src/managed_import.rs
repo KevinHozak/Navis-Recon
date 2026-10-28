@@ -44,6 +44,17 @@ struct Receipt {
     message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     duplicate_override: Option<DuplicateOverride>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    batch_override: Option<BatchOverride>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BatchOverride {
+    candidate_ids: Vec<String>,
+    ledger_revision: String,
+    funding_account: String,
+    review_context: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -116,14 +127,55 @@ pub(crate) struct PreparedPlan {
     funding_account: Option<String>,
     duplicates: Vec<crate::sync_duplicates::DuplicateMatch>,
     duplicate_override: Option<DuplicateOverride>,
+    batch_duplicates: Vec<crate::sync_duplicates::BatchMatch>,
+    batch_override: Option<BatchOverride>,
+    already_imported: bool,
 }
 impl PreparedPlan {
+    pub(crate) fn already_imported(&self) -> bool {
+        self.already_imported
+    }
+    pub(crate) fn set_batch_duplicates(
+        &mut self,
+        matches: Vec<crate::sync_duplicates::BatchMatch>,
+    ) {
+        self.batch_duplicates = matches;
+    }
     pub(crate) fn duplicates(&self) -> &[crate::sync_duplicates::DuplicateMatch] {
         &self.duplicates
     }
     pub(crate) fn source_path(&self) -> &Path {
         &self.source
     }
+}
+
+pub(crate) fn decide_batch(
+    mut plan: PreparedPlan,
+    decision: Option<&str>,
+    reviewed_context: Option<&str>,
+    current_context: &str,
+) -> Result<PreparedPlan, String> {
+    if current_context.len() > 262144 {
+        return Err("Batch review context exceeds supported bounds".into());
+    }
+    if decision.is_some_and(|s| s != "import_reviewed") {
+        return Err("Skipped batch receipts must be deselected".into());
+    }
+    if !plan.batch_duplicates.is_empty() {
+        if decision != Some("import_reviewed") || reviewed_context != Some(current_context) {
+            return Err("Review batch overlaps for every selected receipt after finalizing funding and selection".into());
+        }
+        plan.batch_override = Some(BatchOverride {
+            candidate_ids: plan.batch_duplicates.iter().map(|m| m.id.clone()).collect(),
+            ledger_revision: plan.ledger_before_hash.clone(),
+            funding_account: plan
+                .funding_account
+                .clone()
+                .ok_or("Assign funding before batch review")?,
+            review_context: current_context.into(),
+        });
+    }
+    Ok(plan)
 }
 
 pub(crate) fn decide_duplicates(
@@ -381,6 +433,9 @@ fn prepare_inner(
         funding_account: funding.map(str::to_owned),
         duplicates,
         duplicate_override: None,
+        batch_duplicates: vec![],
+        batch_override: None,
+        already_imported: prior_succeeded,
     })
 }
 
@@ -716,6 +771,44 @@ fn identity(ledger: &Path, source_hash: &str) -> String {
 }
 
 fn receipt_valid(r: &Receipt, filename: &str, cfg: &ImportConfig) -> bool {
+    if let Some(review) = &r.batch_override {
+        let is_hash = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
+        if review.review_context.len() > 262144
+            || review.candidate_ids.is_empty()
+            || review.candidate_ids.len() > 100
+            || review.candidate_ids.iter().any(|s| !is_hash(s))
+            || !is_hash(&review.ledger_revision)
+            || review
+                .candidate_ids
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != review.candidate_ids.len()
+            || !account_root_is(&review.funding_account, &["Assets", "Liabilities"])
+            || !r
+                .entry
+                .lines()
+                .any(|line| line.split_whitespace().next() == Some(review.funding_account.as_str()))
+        {
+            return false;
+        }
+        let Ok(context) = serde_json::from_str::<Vec<(String, String)>>(&review.review_context)
+        else {
+            return false;
+        };
+        if context.is_empty()
+            || context.len() > 1000
+            || !context
+                .iter()
+                .any(|(id, account)| id == &r.item_id && account == &review.funding_account)
+            || context.windows(2).any(|p| p[0] >= p[1])
+            || context.iter().any(|(id, account)| {
+                id.is_empty() || !account_root_is(account, &["Assets", "Liabilities"])
+            })
+        {
+            return false;
+        }
+    }
     if let Some(review) = &r.duplicate_override {
         let is_hash = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
         if review.candidate_ids.is_empty()
@@ -1599,6 +1692,12 @@ fn persist_pre_effect_failure(
                 .unwrap_or(serde_json::Value::Null),
         )
         .ok()?,
+        batch_override: serde_json::from_value(
+            item.get("_prepared_batch_override")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        )
+        .ok()?,
     };
     if !receipt_valid(&receipt, &format!("{operation_id}.json"), cfg)
         || persist(&cfg.store, &receipt).is_err()
@@ -2047,6 +2146,12 @@ fn commit_with_config_cancellable(
                 drop(backup);
             }
             let mut r = Receipt {
+                batch_override: serde_json::from_value(
+                    item.get("_prepared_batch_override")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                )
+                .map_err(|_| "Invalid reviewed batch override")?,
                 duplicate_override: serde_json::from_value(
                     item.get("_prepared_duplicate_override")
                         .cloned()
@@ -2233,6 +2338,7 @@ pub(crate) fn commit_prepared_cancellable(
     if plans.iter().any(|(_, plan)| {
         plan.funding_account.is_none()
             || (!plan.duplicates.is_empty() && plan.duplicate_override.is_none())
+            || (!plan.batch_duplicates.is_empty() && plan.batch_override.is_none())
     }) {
         return plans
             .into_iter()
@@ -2263,6 +2369,7 @@ pub(crate) fn commit_prepared_cancellable(
         item["_prepared_entry"] = serde_json::json!(plan.entry);
         item["_prepared_funding_account"] = serde_json::json!(plan.funding_account);
         item["_prepared_duplicate_override"] = serde_json::json!(plan.duplicate_override);
+        item["_prepared_batch_override"] = serde_json::json!(plan.batch_override);
         item["_prepared_ledger_backup"] = serde_json::json!(plan.ledger_before);
         items.push(item);
     }
