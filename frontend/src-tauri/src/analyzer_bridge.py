@@ -15,8 +15,13 @@ def emit(kind, **fields):
 
 def parse_date(value):
     value = re.sub(r"(\d+)(st|nd|rd|th)", r"\1", value.strip())
+    # Strip only abbreviated-month punctuation before numeric dotted-date
+    # normalization; otherwise "Oct. 25 2026" becomes "Oct/ 25 2026".
+    value = re.sub(r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.',
+                   r'\1', value, flags=re.IGNORECASE)
     for fmt in ("%m/%d/%Y", "%m/%d/%y", "%B %d, %Y", "%b %d, %Y",
-                "%A, %B %d, %Y", "%Y-%m-%d", "%Y/%m/%d", "%Y年%m月"):
+                "%B %d %Y", "%b %d %Y", "%A, %B %d, %Y",
+                "%Y-%m-%d", "%Y/%m/%d", "%Y年%m月"):
         try:
             return datetime.strptime(value.replace('.', '/'), fmt).strftime('%Y-%m-%d')
         except ValueError:

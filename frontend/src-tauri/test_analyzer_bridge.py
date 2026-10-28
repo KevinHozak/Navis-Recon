@@ -44,6 +44,31 @@ def pdf_fixture(path):
 
 
 class AnalyzerTests(unittest.TestCase):
+    def test_printed_billing_dates_with_month_punctuation(self):
+        for value, expected in [('June 25 2026', '2026-06-25'),
+                                ('July 25 2026', '2026-07-25'),
+                                ('Aug. 25 2026', '2026-08-25'),
+                                ('Sep. 25 2026', '2026-09-25'),
+                                ('Oct. 25 2026', '2026-10-25'),
+                                ('10.25.2026', '2026-10-25'),
+                                ('October 25, 2026', '2026-10-25')]:
+            with self.subTest(value=value):
+                self.assertEqual(bridge.parse_date(value), expected)
+        self.assertIsNone(bridge.parse_date('Feb. 30 2026'))
+
+    def test_billing_date_ignores_due_service_and_payment_dates(self):
+        r = rule(name='Water Billing', keywords=['Water Billing'],
+                 date_patterns=[r'Account 12345\s+([A-Za-z]+\.?\s+\d{1,2}\s+\d{4})\s+Prior Balance'],
+                 review_only_reason='Billing statement; verify payment separately.')
+        text = ('Water Billing Due 11/10/26 Account 12345 Oct. 25 2026 '
+                'Prior Balance 86.59 Last Payment Date: 10/10 '
+                'Service 8/27/26 9/29/26 Total: 65.71')
+        self.assertEqual(bridge.rule_date(r, text), '2026-10-25')
+        with self.assertRaisesRegex(ValueError, r'Water Billing \(2026-10-25\): Billing statement'):
+            bridge.analyze_text('wrong-name-2026-11-10.pdf', text, [r])
+        self.assertIsNone(bridge.analyze_text('statement.pdf', text.replace('Oct. 25 2026', 'date missing'), [r]))
+        self.assertIsNone(bridge.analyze_text('statement.pdf', text.replace('Account 12345', 'Account 99999'), [r]))
+
     def test_captured_label_and_period_end(self):
         self.assertEqual(bridge.rule_date(rule(), 'Statement Date: 09/30/2026'), '2026-09-30')
         r = rule(date_patterns=[r'Period: \d{2}/\d{2}/\d{4} to (\d{2}/\d{2}/\d{4})'])
