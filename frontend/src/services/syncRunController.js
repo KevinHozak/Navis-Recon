@@ -13,15 +13,22 @@ export function createSelectionStore() {
     funding(run) {
       return current && current.run_id === run?.run_id ? new Map(current.funding) : new Map()
     },
+    decisions(run) { return current && current.run_id === run?.run_id ? new Map(current.decisions) : new Map() },
     reconcile(run) {
       if (!run?.run_id || !Number.isSafeInteger(run.revision)) return false
       if (current && run.revision <= current.revision && run.run_id !== current.run_id) return false
-      if (current?.run_id !== run.run_id) current = { run_id: run.run_id, revision: run.revision, seen: new Set(), selected: new Set(), funding: new Map() }
+      if (current?.run_id !== run.run_id) current = { run_id: run.run_id, revision: run.revision, seen: new Set(), selected: new Set(), funding: new Map(), decisions: new Map(), duplicateKeys: new Map() }
       if (run.revision < current.revision) return false
       current.revision = run.revision
       const available = new Set(run.funding_accounts || [])
       const matchIds = new Set((run.matches || []).map(match => match.match_id))
       for (const [id, account] of current.funding) if (!matchIds.has(id) || !available.has(account)) current.funding.delete(id)
+      for (const match of run.matches || []) {
+        const key=JSON.stringify((match.possible_duplicates || []).map(item=>item.id))
+        if (current.duplicateKeys.get(match.match_id)!==key) current.decisions.delete(match.match_id)
+        current.duplicateKeys.set(match.match_id,key)
+      }
+      for(const id of current.decisions.keys()) if(!matchIds.has(id))current.decisions.delete(id)
       for (const match of run.matches || []) if (typeof match.match_id === 'string' && !current.seen.has(match.match_id)) { current.seen.add(match.match_id); current.selected.add(match.match_id) }
       if (run.status === 'review' && Array.isArray(run.eligible_match_ids)) {
         const eligible = new Set(run.eligible_match_ids)
@@ -39,12 +46,26 @@ export function createSelectionStore() {
       if (!(run?.matches || []).some(match => match.match_id === matchId) || typeof account !== 'string' || (account && !(run.funding_accounts || []).includes(account))) return false
       this.reconcile(run)
       if (current?.run_id !== run.run_id) return false
+      if (current.funding.get(matchId)!==account) current.decisions.delete(matchId)
       account ? current.funding.set(matchId, account) : current.funding.delete(matchId)
+      return true
+    },
+    decideDuplicate(run, matchId, decision) {
+      const match=run?.matches?.find(item=>item.match_id===matchId)
+      if (!match?.possible_duplicates?.length || !['','already_recorded','import_separately'].includes(decision)) return false
+      this.reconcile(run)
+      if(current?.run_id!==run.run_id)return false
+      decision ? current.decisions.set(matchId,decision) : current.decisions.delete(matchId)
+      if(decision==='already_recorded')current.selected.delete(matchId)
       return true
     },
   }
 }
 const sharedSelection = createSelectionStore()
+
+function validDuplicates(items) {
+  return items===undefined || (Array.isArray(items) && items.length<=100 && new Set(items.map(item=>item?.id)).size===items.length && items.every(item=>item && /^[a-f0-9]{64}$/.test(item.id) && /^\d{4}-\d{2}-\d{2}$/.test(item.date) && typeof item.payee==='string' && typeof item.narration==='string' && typeof item.amount==='string' && /^-?\d+(?:\.\d{1,18})?$/.test(item.amount) && typeof item.currency==='string' && Array.isArray(item.funding_accounts) && item.funding_accounts.every(account=>typeof account==='string') && Number.isInteger(item.days_apart) && item.days_apart>=0 && item.days_apart<=7 && typeof item.merchant_overlap==='boolean'))
+}
 
 function validRun(run) {
   return Boolean(run && Number.isSafeInteger(run.revision) && run.revision >= 0 &&
@@ -54,6 +75,7 @@ function validRun(run) {
     ['logs', 'matches', 'unmatched', 'errors'].every(key => Array.isArray(run[key])) &&
     (['analyzing', 'idle'].includes(run.status) ? run.analysis_outcome === null : ['success', 'partial', 'failed'].includes(run.analysis_outcome)) &&
     new Set(run.matches.map(match => match?.match_id)).size === run.matches.length && run.matches.every(match => typeof match?.match_id === 'string' && match.match_id.length > 0 && typeof match.filename === 'string' && match.filename.length > 0 && typeof match.new_name === 'string' && match.new_name.length > 0) &&
+    run.matches.every(match=>validDuplicates(match.possible_duplicates)) &&
     (run.eligible_match_ids === undefined || (Array.isArray(run.eligible_match_ids) && new Set(run.eligible_match_ids).size === run.eligible_match_ids.length && run.eligible_match_ids.every(id => run.matches.some(match => match.match_id === id)))) &&
     (!['review', 'committing', 'complete'].includes(run.status) || ['success', 'partial'].includes(run.analysis_outcome)) &&
     (run.status !== 'cancelled' || ['success', 'partial', 'failed'].includes(run.analysis_outcome)) &&
@@ -78,7 +100,7 @@ export function createSyncRunController({ api, onChange = () => {}, selectionSto
   let receiptRequest = 0
   let recoveryError = null
   let recoveryRequest = 0
-  const publish = () => { if (!disposed) onChange({ run: state, pending, ready, recovery, recoveryError, receipts, receiptError, selectedIds: selectionStore.values(state), fundingAccounts: selectionStore.funding(state), ...(error ? { error } : {}) }) }
+  const publish = () => { if (!disposed) onChange({ run: state, pending, ready, recovery, recoveryError, receipts, receiptError, selectedIds: selectionStore.values(state), fundingAccounts: selectionStore.funding(state), duplicateDecisions: selectionStore.decisions(state), ...(error ? { error } : {}) }) }
 
   async function refreshReceipts(current = generation) {
     if (disposed || typeof api.getSyncReceipts !== 'function') return false
@@ -197,8 +219,9 @@ export function createSyncRunController({ api, onChange = () => {}, selectionSto
       const ids = Array.isArray(matches) ? matches : []
       const eligible = state?.eligible_match_ids || state?.matches.map(match => match.match_id) || []
       const funding = selectionStore.funding(state)
-      const valid = ids.length > 0 && new Set(ids).size === ids.length && ids.every(id => typeof id === 'string' && eligible.includes(id) && (state?.funding_accounts || []).includes(funding.get(id)))
-      const payload = ids.map(matchId => ({ matchId, fundingAccount: funding.get(matchId) }))
+      const decisions=selectionStore.decisions(state)
+      const valid = ids.length > 0 && new Set(ids).size === ids.length && ids.every(id => typeof id === 'string' && eligible.includes(id) && (state?.funding_accounts || []).includes(funding.get(id)) && (!state.matches.find(match=>match.match_id===id)?.possible_duplicates?.length || decisions.get(id)==='import_separately'))
+      const payload = ids.map(matchId => ({ matchId, fundingAccount: funding.get(matchId), ...(decisions.has(matchId)?{duplicateDecision:decisions.get(matchId)}:{}) }))
       return ready && state?.status === 'review' && ['success', 'partial'].includes(state.analysis_outcome) && valid ? invoke(() => api.commitLedgerSync(state.run_id, payload)) : Promise.resolve(false)
     },
     cancel: () => ready && ['review', 'analyzing', 'committing'].includes(state?.status) && !state?.cancelling ? invoke(() => api.cancelSyncRun(state.run_id)) : Promise.resolve(false),
@@ -223,6 +246,12 @@ export function createSyncRunController({ api, onChange = () => {}, selectionSto
       if (disposed || pending || !ready || state?.status !== 'review' || !(state.eligible_match_ids || state.matches.map(match => match.match_id)).includes(matchId)) return false
       const changed = selectionStore.assignFunding(state, matchId, account)
       if (changed) publish()
+      return changed
+    },
+    decideDuplicate(matchId, decision) {
+      if(disposed || pending || !ready || state?.status!=='review' || !(state.eligible_match_ids || state.matches.map(m=>m.match_id)).includes(matchId))return false
+      const changed=selectionStore.decideDuplicate(state,matchId,decision)
+      if(changed)publish()
       return changed
     },
     dispose() { disposed = true; generation += 1; registration?.abort(); registration = null; unlisten?.(); unlisten = null },

@@ -69,6 +69,8 @@ pub struct SyncRun {
 pub struct FundingSelection {
     match_id: String,
     funding_account: String,
+    #[serde(default)]
+    duplicate_decision: Option<String>,
 }
 
 impl Default for SyncRun {
@@ -286,6 +288,7 @@ impl Coordinator {
             if let Some(cfg) = self.import_config.lock().ok()?.as_ref() {
                 match crate::managed_import::prepare_review(&data, cfg) {
                     Ok(plan) => {
+                        data["possible_duplicates"] = json!(plan.duplicates());
                         self.plans
                             .lock()
                             .ok()?
@@ -437,6 +440,10 @@ impl Coordinator {
                     .ok_or("A selected match has no valid analysis-time prepared plan")?;
                 let assigned =
                     crate::managed_import::assign_funding(plan, &cfg, &selection.funding_account)?;
+                let assigned = crate::managed_import::decide_duplicates(
+                    assigned,
+                    selection.duplicate_decision.as_deref(),
+                )?;
                 Ok::<_, String>((selection.match_id.clone(), assigned))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -654,7 +661,15 @@ fn source_ref_fn(run_id: &str, filename: &str) -> String {
 fn strip_worker_identity(value: &mut Value) {
     if let Some(object) = value.as_object_mut() {
         object.retain(|key, _| {
-            !key.starts_with('_') && key != "funding_account" && key != "fundingAccount"
+            !key.starts_with('_')
+                && ![
+                    "funding_account",
+                    "fundingAccount",
+                    "possible_duplicates",
+                    "duplicate_decision",
+                    "duplicateDecision",
+                ]
+                .contains(&key.as_str())
         });
         object.remove("run_id");
         object.remove("revision");
@@ -2276,6 +2291,7 @@ mod tests {
                 &[FundingSelection {
                     match_id,
                     funding_account: "Assets:Bank:Checking".into(),
+                    duplicate_decision: None,
                 }],
             )
             .unwrap();

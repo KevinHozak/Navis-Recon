@@ -42,6 +42,16 @@ struct Receipt {
     state: String,
     retry_safe: bool,
     message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    duplicate_override: Option<DuplicateOverride>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DuplicateOverride {
+    candidate_ids: Vec<String>,
+    ledger_revision: String,
+    funding_account: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -104,11 +114,39 @@ pub(crate) struct PreparedPlan {
     ledger_before_hash: String,
     entry: String,
     funding_account: Option<String>,
+    duplicates: Vec<crate::sync_duplicates::DuplicateMatch>,
+    duplicate_override: Option<DuplicateOverride>,
 }
 impl PreparedPlan {
+    pub(crate) fn duplicates(&self) -> &[crate::sync_duplicates::DuplicateMatch] {
+        &self.duplicates
+    }
     pub(crate) fn source_path(&self) -> &Path {
         &self.source
     }
+}
+
+pub(crate) fn decide_duplicates(
+    mut plan: PreparedPlan,
+    decision: Option<&str>,
+) -> Result<PreparedPlan, String> {
+    if decision.is_some_and(|s| s != "import_separately") {
+        return Err("Already-recorded receipts must be deselected, not imported".into());
+    }
+    if !plan.duplicates.is_empty() {
+        if decision != Some("import_separately") {
+            return Err("Review possible ledger duplicates and explicitly choose separate payment before approval".into());
+        }
+        plan.duplicate_override = Some(DuplicateOverride {
+            candidate_ids: plan.duplicates.iter().map(|m| m.id.clone()).collect(),
+            ledger_revision: plan.ledger_before_hash.clone(),
+            funding_account: plan
+                .funding_account
+                .clone()
+                .ok_or("Assign funding before duplicate review")?,
+        });
+    }
+    Ok(plan)
 }
 
 pub(crate) fn runtime_config() -> Result<ImportConfig, String> {
@@ -326,6 +364,11 @@ fn prepare_inner(
             "Generated transaction does not validate in the supported ledger subset"
         })?;
     }
+    let duplicates = if funding.is_none() && !prior_succeeded {
+        crate::sync_duplicates::candidates(&ledger_before, item, &cfg.currency)?
+    } else {
+        vec![]
+    };
     Ok(PreparedPlan {
         item: item.clone(),
         source,
@@ -336,6 +379,8 @@ fn prepare_inner(
         ledger_before,
         entry,
         funding_account: funding.map(str::to_owned),
+        duplicates,
+        duplicate_override: None,
     })
 }
 
@@ -671,6 +716,27 @@ fn identity(ledger: &Path, source_hash: &str) -> String {
 }
 
 fn receipt_valid(r: &Receipt, filename: &str, cfg: &ImportConfig) -> bool {
+    if let Some(review) = &r.duplicate_override {
+        let is_hash = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
+        if review.candidate_ids.is_empty()
+            || review.candidate_ids.len() > 100
+            || review.candidate_ids.iter().any(|s| !is_hash(s))
+            || review
+                .candidate_ids
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != review.candidate_ids.len()
+            || !is_hash(&review.ledger_revision)
+            || !account_root_is(&review.funding_account, &["Assets", "Liabilities"])
+            || !r
+                .entry
+                .lines()
+                .any(|line| line.split_whitespace().next() == Some(review.funding_account.as_str()))
+        {
+            return false;
+        }
+    }
     let marker = format!("navis_recon_import \"{}\"", r.identity);
     let backup = fs::read(cfg.store.join(&r.ledger_backup)).ok();
     let backup_valid = backup
@@ -1527,6 +1593,12 @@ fn persist_pre_effect_failure(
         state: "failed".into(),
         retry_safe: no_effects && source_matches,
         message: message.into(),
+        duplicate_override: serde_json::from_value(
+            item.get("_prepared_duplicate_override")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        )
+        .ok()?,
     };
     if !receipt_valid(&receipt, &format!("{operation_id}.json"), cfg)
         || persist(&cfg.store, &receipt).is_err()
@@ -1975,6 +2047,12 @@ fn commit_with_config_cancellable(
                 drop(backup);
             }
             let mut r = Receipt {
+                duplicate_override: serde_json::from_value(
+                    item.get("_prepared_duplicate_override")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                )
+                .map_err(|_| "Invalid reviewed duplicate override")?,
                 version: 2,
                 operation: op.clone(),
                 identity: op,
@@ -2152,7 +2230,10 @@ pub(crate) fn commit_prepared_cancellable(
         Ok(guard) => guard,
         Err(message) => return vec![store_error(&message)],
     };
-    if plans.iter().any(|(_, plan)| plan.funding_account.is_none()) {
+    if plans.iter().any(|(_, plan)| {
+        plan.funding_account.is_none()
+            || (!plan.duplicates.is_empty() && plan.duplicate_override.is_none())
+    }) {
         return plans
             .into_iter()
             .map(|(item_id, plan)| ItemOutcome {
@@ -2160,7 +2241,7 @@ pub(crate) fn commit_prepared_cancellable(
                 filename: plan.item["filename"].as_str().unwrap_or("").to_owned(),
                 state: "failed".into(),
                 retry_safe: false,
-                message: "Every selected receipt requires an assigned funding account".into(),
+            message: "Every selected receipt requires funding and any necessary duplicate-review decision".into(),
                 operation_id: None,
             })
             .collect();
@@ -2181,6 +2262,7 @@ pub(crate) fn commit_prepared_cancellable(
             .is_some_and(|bytes| bytes.as_slice() == plan.ledger_before.as_slice()));
         item["_prepared_entry"] = serde_json::json!(plan.entry);
         item["_prepared_funding_account"] = serde_json::json!(plan.funding_account);
+        item["_prepared_duplicate_override"] = serde_json::json!(plan.duplicate_override);
         item["_prepared_ledger_backup"] = serde_json::json!(plan.ledger_before);
         items.push(item);
     }
@@ -2219,6 +2301,46 @@ mod tests {
         )
         .unwrap();
         (dir, cfg, item)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn duplicate_review_blocks_missing_or_skip_decisions_and_records_explicit_override() {
+        let (_dir, cfg, item) = funding_fixture();
+        let mut baseline = fs::read(&cfg.ledger).unwrap();
+        baseline.extend_from_slice(b"2026-10-23 * \"Groceries\"\n  Expenses:Food 12.34 USD\n  Assets:Bank:Checking -12.34 USD\n");
+        fs::write(&cfg.ledger, &baseline).unwrap();
+        let plan = assign_funding(
+            prepare_review(&item, &cfg).unwrap(),
+            &cfg,
+            "Assets:Retirement:HSA",
+        )
+        .unwrap();
+        assert_eq!(plan.duplicates.len(), 1);
+        assert!(decide_duplicates(plan.clone(), None).is_err());
+        assert!(decide_duplicates(plan.clone(), Some("already_recorded")).is_err());
+        assert!(decide_duplicates(plan.clone(), Some("forged")).is_err());
+        assert_eq!(
+            commit_prepared(
+                vec![("blocked".into(), plan.clone())],
+                "blocked",
+                cfg.clone()
+            )[0]
+            .state,
+            "failed"
+        );
+        assert_eq!(fs::read(&cfg.ledger).unwrap(), baseline);
+        let reviewed = decide_duplicates(plan, Some("import_separately")).unwrap();
+        let out = commit_prepared(vec![("approved".into(), reviewed)], "approved", cfg.clone());
+        assert_eq!(out[0].state, "succeeded", "{out:?}");
+        let id = identity(&cfg.ledger, &hash(b"synthetic statement bytes"));
+        let raw = fs::read(cfg.store.join(format!("{id}.json"))).unwrap();
+        let receipt: Receipt = serde_json::from_slice(&raw).unwrap();
+        let audit = receipt.duplicate_override.unwrap();
+        assert_eq!(audit.candidate_ids.len(), 1);
+        assert_eq!(audit.ledger_revision, hash(&baseline));
+        assert_eq!(audit.funding_account, "Assets:Retirement:HSA");
+        assert!(prepare_review(&item, &cfg).unwrap().duplicates.is_empty()); // verified same-PDF success is no new payment.
     }
 
     #[cfg(windows)]

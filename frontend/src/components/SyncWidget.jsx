@@ -26,7 +26,8 @@ const SyncWidget = ({ initialFilter = {} }) => {
 
   const selected = view.selectedIds || new Set()
   const funding = view.fundingAccounts || new Map()
-  const fundingComplete = [...selected].every(id => (run.funding_accounts || []).includes(funding.get(id)))
+  const duplicateDecisions = view.duplicateDecisions || new Map()
+  const fundingComplete = [...selected].every(id => (run.funding_accounts || []).includes(funding.get(id)) && (!matches.find(m=>m.match_id===id)?.possible_duplicates?.length || duplicateDecisions.get(id)==='import_separately'))
   const outcomes = view.recovery || managedOutcomes(run)
   const [recoveryFilter, setRecoveryFilter] = useState(initialFilter.operationId || (initialFilter.recoveryOnly ? 'attention' : 'all'));
   const filteredOutcomes = filterRecoveryOutcomes(outcomes, recoveryFilter);
@@ -77,13 +78,13 @@ const SyncWidget = ({ initialFilter = {} }) => {
           {status === 'analyzing' && <div className="text-white/50 animate-pulse mt-2">&gt; _</div>}
         </div></div>}
       {showsReview(status) && <div className="flex-1 overflow-y-auto custom-scrollbar p-6 space-y-8">
-        {status === 'review' && <p className="text-sm text-amber-200" role="status">Choose a funding account for each selected receipt. Unassigned receipts cannot be committed; deselect them to approve other receipts.</p>}
+        {status === 'review' && <p className="text-sm text-amber-200" role="status">Choose funding and resolve any possible duplicates for each selected receipt. Unassigned or unresolved receipts cannot be committed; deselect them to approve other receipts.</p>}
         {run.analysis_outcome && <div className={`${run.analysis_outcome === 'failed' ? 'text-red-400' : run.analysis_outcome === 'partial' ? 'text-amber-300' : 'text-cyan-300'} p-3 border border-white/10 rounded`}>Analysis {run.analysis_outcome}{run.analysis_outcome === 'partial' ? ` â€” ${matches.length} match(es), ${unmatched.length + errors.length} diagnostic(s). Review successful matches; unresolved items cannot be committed.` : ''}</div>}
         {status === 'failed' && <div className="bg-red-500/10 border border-red-500/30 text-red-400 p-4 rounded text-center font-bold uppercase">{run.analysis_outcome === 'failed' ? 'Analysis Failed' : 'Commit Failed'}</div>}
         {status === 'complete' && <div className="bg-green-500/10 border border-green-500/30 text-green-400 p-4 rounded text-center font-bold uppercase">Sync Completed Successfully</div>}
 
         {(status === 'review' || status === 'analyzing' || status === 'failed') && <div><h3 className="text-lg font-black uppercase text-accent mb-4 border-b border-white/10 pb-2">{status === 'analyzing' ? 'Matches so far' : status === 'failed' ? 'Retained matches' : 'Ready to Commit'} ({matches.length})</h3>
-          {matches.length === 0 ? <div className="text-white/40 italic">No matches found.</div> : <div className="space-y-2">{matches.map((m) => <div key={m.match_id} className={`flex flex-col items-stretch gap-4 lg:flex-row lg:items-center justify-between p-4 rounded border ${selected.has(m.match_id) ? 'bg-zinc-900 border-accent/30' : 'bg-black border-white/5 opacity-50'}`}>
+          {matches.length === 0 ? <div className="text-white/40 italic">No matches found.</div> : <div className="space-y-2">{matches.map((m) => <div key={m.match_id} className={`flex flex-wrap items-center gap-4 justify-between p-4 rounded border ${selected.has(m.match_id) ? 'bg-zinc-900 border-accent/30' : 'bg-black border-white/5 opacity-50'}`}>
             <div className="flex min-w-0 items-center gap-4"><input type="checkbox" checked={selected.has(m.match_id)} onChange={() => toggle(m.match_id)} className="w-5 h-5 shrink-0 accent-accent" disabled={!canToggleMatch(run, view.ready, view.pending, m.match_id)}/><div className="min-w-0 break-words"><div className="font-bold text-white/90">{displayText(m.rule)} <span className="text-white/30 text-sm font-normal">({displayText(m.date)})</span></div><div className="text-xs text-white/50 font-mono mt-1 break-all">{displayText(m.filename)} -&gt; {displayText(m.new_name)}</div></div></div>
             <div className="text-right min-w-64 max-w-full shrink-0"><div className="font-mono text-accent">{displayText(m.amount) ? `${displayText(m.amount)} ${displayText(run.currency)}` : 'Amount unavailable'}</div><div className="text-xs text-white/50 mt-1">{displayText(m.category)} {m.is_cleared ? '(Cleared)' : '(Pending)'}</div>
               <label className="block text-xs text-white/70 mt-3">Funding account
@@ -94,6 +95,23 @@ const SyncWidget = ({ initialFilter = {} }) => {
               </label>
               {!funding.has(m.match_id) && <div className="text-xs text-amber-300 mt-1">Unassigned — approval blocked</div>}
               {m.source_ref && <button type="button" disabled={!view.ready || view.pending || run.cancelling} onClick={()=>controllerRef.current?.revealSource({sourceRef:m.source_ref,runId:run.run_id,itemId:m.match_id})} className="mt-2 text-xs underline disabled:opacity-40">Show file</button>}</div>
+            {m.possible_duplicates?.length > 0 ? <section aria-label={`Possible duplicates for ${m.filename}`} className="w-full rounded border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-amber-100">
+              <h4 className="font-semibold">Possible ledger matches ({m.possible_duplicates.length})</h4>
+              <p className="text-xs opacity-80 mt-1">Same signed amount and currency within seven days. These may be different payments; compare dates, merchant text and funding.</p>
+              <ul className="max-h-64 overflow-y-auto space-y-2 mt-2">{m.possible_duplicates.map(item=><li key={item.id} className="border-t border-white/10 pt-2 break-words">
+                <div>{displayText(item.date)} · {displayText(item.amount)} {displayText(item.currency)} · {displayText(item.payee) || displayText(item.narration) || 'Unnamed ledger payment'}</div>
+                {item.payee && item.narration && <div className="text-xs opacity-80">{displayText(item.narration)}</div>}
+                <div className="text-xs opacity-80">{item.funding_accounts.map(displayText).join(', ') || 'Funding not identified'} · {item.merchant_overlap ? 'Merchant text overlaps' : 'Merchant text differs'}{funding.has(m.match_id) ? item.funding_accounts.includes(funding.get(m.match_id)) ? ' · Selected funding matches' : ' · Selected funding differs' : ''}</div>
+              </li>)}</ul>
+              <label className="block mt-3 text-xs">Duplicate decision
+                <select aria-label={`Duplicate decision for ${m.filename}`} value={duplicateDecisions.get(m.match_id) || ''} onChange={event=>controllerRef.current?.decideDuplicate(m.match_id,event.target.value)} disabled={status!=='review' || !canToggleMatch(run,view.ready,view.pending,m.match_id)} className="block w-full mt-1 p-2 rounded border border-amber-500/30 bg-zinc-950 text-white disabled:opacity-40">
+                  <option value="">Choose a decision — approval blocked</option>
+                  <option value="already_recorded">Already recorded — skip this receipt</option>
+                  <option value="import_separately">Separate payment — import anyway</option>
+                </select>
+              </label>
+              {duplicateDecisions.get(m.match_id)==='already_recorded' && <p className="text-xs mt-2">Skipped for this review. No posting or archive will be created.</p>}
+            </section> : <p className="w-full text-xs text-white/40">{Array.isArray(m.possible_duplicates) ? 'No possible ledger matches within seven days. This does not rule out duplicates.' : 'Duplicate check unavailable; resolve analysis errors before approval.'}</p>}
           </div>)}</div>}</div>}
         {(unmatched.length || errors.length) > 0 && <div><h3 className="text-lg font-black uppercase text-red-400 mb-4 border-b border-white/10 pb-2">Requires Manual Attention</h3>
           {[...unmatched, ...errors].map((item, i) => <div key={i} className="p-4 mb-2 rounded border bg-red-950/20 border-red-900/30"><div className="font-bold text-red-400">{displayText(item.filename) || 'System Error'}</div><div className="text-sm text-red-400/70 mt-1">{displayText(item.message)}</div>{item.source_ref && <button type="button" disabled={!view.ready || view.pending || run.cancelling} onClick={()=>controllerRef.current?.revealSource({sourceRef:item.source_ref,runId:run.run_id})} className="mt-2 text-xs underline disabled:opacity-40">Show file</button>}</div>)}</div>}

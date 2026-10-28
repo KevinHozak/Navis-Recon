@@ -1,6 +1,6 @@
 [package]
 name = "navis-recon"
-version = "1.0.20"
+version = "1.0.21"
 description = "Navis-Recon desktop shell"
 authors = ["Kevin Hozak"]
 edition = "2021"

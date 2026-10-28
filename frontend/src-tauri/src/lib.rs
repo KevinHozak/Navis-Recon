@@ -13,6 +13,7 @@ mod records;
 mod review_audit;
 mod statements;
 mod sync;
+mod sync_duplicates;
 mod sync_process;
 mod sync_receipts;
 

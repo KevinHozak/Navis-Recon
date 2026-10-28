@@ -53,6 +53,29 @@ const snapshot = (run_id, revision, status = 'idle') => ({ run_id, revision, seq
 const event = run => ({ run_id: run.run_id, revision: run.revision, sequence: run.sequence, status: run.status, snapshot: run })
 const createSyncRunController = options => makeSyncRunController({ selectionStore: createSelectionStore(), ...options })
 
+const possibleDuplicate = (id='a'.repeat(64)) => ({id,date:'2026-01-01',payee:'Example Pharmacy',narration:'Ledger payment',amount:'12.34',currency:'USD',funding_accounts:['Assets:Bank:Checking'],days_apart:0,merchant_overlap:true})
+
+test('possible duplicates require an explicit decision, skip deselects, and changed funding resets review', async () => {
+  const store=createSelectionStore(); const calls=[]
+  const review={...snapshot('duplicates',1,'review'),funding_accounts:['Assets:Bank:Checking','Assets:HSA'],eligible_match_ids:['m'],matches:[{match_id:'m',filename:'new.pdf',new_name:'new.pdf',possible_duplicates:[possibleDuplicate()]}]}
+  const api={listenForSyncEvents:async()=>()=>{},getSyncRun:async()=>review,commitLedgerSync:async(id,payload)=>{calls.push(payload);return {...review,revision:2,sequence:2,status:'committing'}}}
+  const make=()=>makeSyncRunController({api,selectionStore:store});let controller=make();await controller.connect()
+  controller.assignFunding('m','Assets:Bank:Checking');assert.equal(await controller.commit(['m']),false)
+  assert.equal(controller.decideDuplicate('m','unknown'),false)
+  controller.decideDuplicate('m','already_recorded');assert.equal(store.values(review).size,0);assert.equal(await controller.commit(['m']),false)
+  controller.toggle('m');controller.decideDuplicate('m','import_separately')
+  controller.assignFunding('m','Assets:HSA');assert.equal(await controller.commit(['m']),false)
+  controller.decideDuplicate('m','import_separately');controller.dispose();controller=make();await controller.connect()
+  assert.equal(await controller.commit(['m']),true);assert.deepEqual(calls[0],[{matchId:'m',fundingAccount:'Assets:HSA',duplicateDecision:'import_separately'}]);controller.dispose()
+  store.reconcile({...review,revision:3,matches:[{...review.matches[0],possible_duplicates:[possibleDuplicate('b'.repeat(64))]}]});assert.equal(store.decisions(review).size,0)
+})
+
+test('malformed possible-match data prevents review connection', async () => {
+  const review={...snapshot('bad-duplicates',1,'review'),matches:[{match_id:'m',filename:'new.pdf',new_name:'new.pdf',possible_duplicates:[{id:'forged'}]}]}
+  const controller=createSyncRunController({api:{listenForSyncEvents:async()=>()=>{},getSyncRun:async()=>review}})
+  await controller.connect();assert.equal(controller.getState().ready,false);assert.equal(await controller.commit(['m']),false);controller.dispose()
+})
+
 test('subscribes before snapshot and ignores the older snapshot after an event', async () => {
   const gate = deferred(); let handlers; const seen = []
   const controller = createSyncRunController({ api: {
