@@ -10,12 +10,18 @@ export function createSelectionStore() {
       if (!run?.run_id) return new Set()
       return current?.run_id === run.run_id ? new Set(current.selected) : new Set()
     },
+    funding(run) {
+      return current && current.run_id === run?.run_id ? new Map(current.funding) : new Map()
+    },
     reconcile(run) {
       if (!run?.run_id || !Number.isSafeInteger(run.revision)) return false
       if (current && run.revision <= current.revision && run.run_id !== current.run_id) return false
-      if (current?.run_id !== run.run_id) current = { run_id: run.run_id, revision: run.revision, seen: new Set(), selected: new Set() }
+      if (current?.run_id !== run.run_id) current = { run_id: run.run_id, revision: run.revision, seen: new Set(), selected: new Set(), funding: new Map() }
       if (run.revision < current.revision) return false
       current.revision = run.revision
+      const available = new Set(run.funding_accounts || [])
+      const matchIds = new Set((run.matches || []).map(match => match.match_id))
+      for (const [id, account] of current.funding) if (!matchIds.has(id) || !available.has(account)) current.funding.delete(id)
       for (const match of run.matches || []) if (typeof match.match_id === 'string' && !current.seen.has(match.match_id)) { current.seen.add(match.match_id); current.selected.add(match.match_id) }
       if (run.status === 'review' && Array.isArray(run.eligible_match_ids)) {
         const eligible = new Set(run.eligible_match_ids)
@@ -28,6 +34,13 @@ export function createSelectionStore() {
       this.reconcile(run)
       if (current?.run_id !== run.run_id) return
       current.selected.has(matchId) ? current.selected.delete(matchId) : current.selected.add(matchId)
+    },
+    assignFunding(run, matchId, account) {
+      if (!(run?.matches || []).some(match => match.match_id === matchId) || typeof account !== 'string' || (account && !(run.funding_accounts || []).includes(account))) return false
+      this.reconcile(run)
+      if (current?.run_id !== run.run_id) return false
+      account ? current.funding.set(matchId, account) : current.funding.delete(matchId)
+      return true
     },
   }
 }
@@ -45,6 +58,7 @@ function validRun(run) {
     (!['review', 'committing', 'complete'].includes(run.status) || ['success', 'partial'].includes(run.analysis_outcome)) &&
     (run.status !== 'cancelled' || ['success', 'partial', 'failed'].includes(run.analysis_outcome)) &&
     (run.cancelling === undefined || typeof run.cancelling === 'boolean') &&
+    (run.funding_accounts === undefined || (Array.isArray(run.funding_accounts) && run.funding_accounts.every(account => typeof account === 'string'))) &&
     (run.managed_outcomes === undefined || validManagedOutcomes(run.managed_outcomes)) && Object.hasOwn(run, 'result') && (run.result === null || (typeof run.result === 'object' && !Array.isArray(run.result))))
 }
 
@@ -64,7 +78,7 @@ export function createSyncRunController({ api, onChange = () => {}, selectionSto
   let receiptRequest = 0
   let recoveryError = null
   let recoveryRequest = 0
-  const publish = () => { if (!disposed) onChange({ run: state, pending, ready, recovery, recoveryError, receipts, receiptError, selectedIds: selectionStore.values(state), ...(error ? { error } : {}) }) }
+  const publish = () => { if (!disposed) onChange({ run: state, pending, ready, recovery, recoveryError, receipts, receiptError, selectedIds: selectionStore.values(state), fundingAccounts: selectionStore.funding(state), ...(error ? { error } : {}) }) }
 
   async function refreshReceipts(current = generation) {
     if (disposed || typeof api.getSyncReceipts !== 'function') return false
@@ -182,8 +196,10 @@ export function createSyncRunController({ api, onChange = () => {}, selectionSto
     commit: (matches) => {
       const ids = Array.isArray(matches) ? matches : []
       const eligible = state?.eligible_match_ids || state?.matches.map(match => match.match_id) || []
-      const valid = ids.length > 0 && ids.every(id => typeof id === 'string' && eligible.includes(id))
-      return ready && state?.status === 'review' && ['success', 'partial'].includes(state.analysis_outcome) && valid ? invoke(() => api.commitLedgerSync(state.run_id, ids)) : Promise.resolve(false)
+      const funding = selectionStore.funding(state)
+      const valid = ids.length > 0 && new Set(ids).size === ids.length && ids.every(id => typeof id === 'string' && eligible.includes(id) && (state?.funding_accounts || []).includes(funding.get(id)))
+      const payload = ids.map(matchId => ({ matchId, fundingAccount: funding.get(matchId) }))
+      return ready && state?.status === 'review' && ['success', 'partial'].includes(state.analysis_outcome) && valid ? invoke(() => api.commitLedgerSync(state.run_id, payload)) : Promise.resolve(false)
     },
     cancel: () => ready && ['review', 'analyzing', 'committing'].includes(state?.status) && !state?.cancelling ? invoke(() => api.cancelSyncRun(state.run_id)) : Promise.resolve(false),
     revealSource(refs) {
@@ -203,6 +219,12 @@ export function createSyncRunController({ api, onChange = () => {}, selectionSto
       })
     },
     toggle(matchId) { if (!pending && ready && (state?.status === 'analyzing' || state?.status === 'review') && (state.status !== 'review' || (state.eligible_match_ids || state.matches.map(match => match.match_id)).includes(matchId))) { selectionStore.toggle(state, matchId); publish() } },
+    assignFunding(matchId, account) {
+      if (disposed || pending || !ready || state?.status !== 'review' || !(state.eligible_match_ids || state.matches.map(match => match.match_id)).includes(matchId)) return false
+      const changed = selectionStore.assignFunding(state, matchId, account)
+      if (changed) publish()
+      return changed
+    },
     dispose() { disposed = true; generation += 1; registration?.abort(); registration = null; unlisten?.(); unlisten = null },
     getState: () => ({ run: state, pending, ready, recovery, recoveryError, receipts, receiptError }),
   }

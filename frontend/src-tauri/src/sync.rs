@@ -45,6 +45,10 @@ pub struct SyncRun {
     unmatched: Vec<Value>,
     errors: Vec<Value>,
     eligible_match_ids: Vec<String>,
+    #[serde(default)]
+    funding_accounts: Vec<String>,
+    #[serde(default)]
+    currency: String,
     result: Option<Value>,
     #[serde(default)]
     managed_outcomes: Vec<crate::managed_import::ItemOutcome>,
@@ -58,6 +62,13 @@ pub struct SyncRun {
     receipt_id: Option<String>,
     #[serde(default)]
     receipt_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FundingSelection {
+    match_id: String,
+    funding_account: String,
 }
 
 impl Default for SyncRun {
@@ -74,6 +85,8 @@ impl Default for SyncRun {
             unmatched: vec![],
             errors: vec![],
             eligible_match_ids: vec![],
+            funding_accounts: vec![],
+            currency: String::new(),
             result: None,
             managed_outcomes: vec![],
             operation_kind: None,
@@ -112,6 +125,7 @@ impl Coordinator {
         &self,
         cfg: crate::managed_import::ImportConfig,
     ) -> Result<SyncRun, String> {
+        let funding_accounts = crate::managed_import::funding_accounts(&cfg)?;
         let mut run = self
             .current
             .lock()
@@ -143,6 +157,8 @@ impl Coordinator {
             sequence: 0,
             status: Phase::Analyzing,
             started_at_ms: Some(crate::sync_receipts::now_ms()),
+            funding_accounts,
+            currency: cfg.currency().to_owned(),
             ..SyncRun::default()
         };
         if let Some(id) = run.run_id.as_ref() {
@@ -268,7 +284,7 @@ impl Coordinator {
                 return None;
             }
             if let Some(cfg) = self.import_config.lock().ok()?.as_ref() {
-                match crate::managed_import::prepare(&data, cfg) {
+                match crate::managed_import::prepare_review(&data, cfg) {
                     Ok(plan) => {
                         self.plans
                             .lock()
@@ -375,7 +391,7 @@ impl Coordinator {
     fn begin_managed_commit(
         &self,
         id: &str,
-        ids: &[String],
+        selections: &[FundingSelection],
     ) -> Result<
         (
             SyncRun,
@@ -384,7 +400,7 @@ impl Coordinator {
         ),
         String,
     > {
-        if ids.is_empty() {
+        if selections.is_empty() {
             return Err("Select at least one match to commit".into());
         }
         let mut run = self
@@ -408,20 +424,26 @@ impl Coordinator {
             .cloned()
             .ok_or("Managed configuration unavailable")?;
         let plans = self.plans.lock().map_err(|_| "Managed plans unavailable")?;
-        let selected = ids
+        let ids: Vec<String> = selections
             .iter()
-            .map(|item_id| {
-                plans
-                    .get(item_id)
+            .map(|item| item.match_id.clone())
+            .collect();
+        let selected = selections
+            .iter()
+            .map(|selection| {
+                let plan = plans
+                    .get(&selection.match_id)
                     .cloned()
-                    .map(|plan| (item_id.clone(), plan))
-                    .ok_or("A selected match has no valid analysis-time prepared plan")
+                    .ok_or("A selected match has no valid analysis-time prepared plan")?;
+                let assigned =
+                    crate::managed_import::assign_funding(plan, &cfg, &selection.funding_account)?;
+                Ok::<_, String>((selection.match_id.clone(), assigned))
             })
             .collect::<Result<Vec<_>, _>>()?;
         if ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len() {
             return Err("Commit selection contains duplicate items".into());
         }
-        for item_id in ids {
+        for item_id in &ids {
             if !run.eligible_match_ids.contains(item_id) {
                 return Err(
                     "Commit selection does not belong to this run's analysis results".into(),
@@ -631,6 +653,9 @@ fn source_ref_fn(run_id: &str, filename: &str) -> String {
 
 fn strip_worker_identity(value: &mut Value) {
     if let Some(object) = value.as_object_mut() {
+        object.retain(|key, _| {
+            !key.starts_with('_') && key != "funding_account" && key != "fundingAccount"
+        });
         object.remove("run_id");
         object.remove("revision");
         object.remove("sequence");
@@ -1526,7 +1551,7 @@ fn local_analysis_args(inbox: &std::path::Path) -> Vec<String> {
 pub fn commit_ledger_sync(
     app: AppHandle,
     run_id: String,
-    payload: Vec<String>,
+    payload: Vec<FundingSelection>,
 ) -> Result<SyncRun, String> {
     let c = coordinator();
     c.configure_receipts();
@@ -1722,7 +1747,7 @@ mod tests {
         fs::create_dir_all(&inbox).unwrap();
         fs::create_dir_all(&archive).unwrap();
         fs::create_dir_all(&store).unwrap();
-        fs::write(&ledger, "; test ledger\n").unwrap();
+        fs::write(&ledger, "2020-01-01 open Assets:Bank:Checking USD\n2020-01-01 open Expenses:Food USD\n2020-01-02 * \"Synthetic opening\"\n  Expenses:Food 0 USD\n  Assets:Bank:Checking 0 USD\n").unwrap();
         let cfg = crate::managed_import::ImportConfig::injected(
             fs::canonicalize(inbox.clone()).unwrap(),
             fs::canonicalize(archive).unwrap(),
@@ -2216,7 +2241,11 @@ mod tests {
         fs::create_dir_all(&store).unwrap();
         fs::write(inbox.join("synthetic.pdf"), b"synthetic statement").unwrap();
         let ledger = temp.0.join("synthetic.beancount");
-        fs::write(&ledger, "; synthetic ledger\n").unwrap();
+        fs::write(
+            &ledger,
+            "2020-01-01 open Assets:Bank:Checking USD\n2020-01-01 open Expenses:Food USD\n2020-01-02 * \"Synthetic opening\"\n  Expenses:Food 0 USD\n  Assets:Bank:Checking 0 USD\n",
+        )
+        .unwrap();
         let cfg = crate::managed_import::ImportConfig::injected(
             fs::canonicalize(inbox.clone()).unwrap(),
             fs::canonicalize(archive.clone()).unwrap(),
@@ -2241,7 +2270,15 @@ mod tests {
         assert_eq!(review.eligible_match_ids.len(), 1);
         let match_id = review.eligible_match_ids[0].clone();
         fs::write(inbox.join("synthetic.pdf"), b"substituted after review").unwrap();
-        let (_, plans, cfg) = coordinator.begin_managed_commit(&id, &[match_id]).unwrap();
+        let (_, plans, cfg) = coordinator
+            .begin_managed_commit(
+                &id,
+                &[FundingSelection {
+                    match_id,
+                    funding_account: "Assets:Bank:Checking".into(),
+                }],
+            )
+            .unwrap();
         let before = fs::read(&ledger).unwrap();
         let outcomes = crate::managed_import::commit_prepared(plans, &id, cfg);
         assert_eq!(outcomes.len(), 1);

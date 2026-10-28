@@ -16,8 +16,40 @@ test('filtered import recovery never retries hidden operations and keeps uncerta
   assert.equal(filterRecoveryOutcomes(rows,'all').length,4);
 });
 
+test('mixed funding requires every selected receipt, persists across remount, and clears for a new run', async () => {
+  const store=createSelectionStore(); const calls=[]
+  let review={...snapshot('mixed',1,'review'),funding_accounts:['Assets:Retirement:HSA','Liabilities:CreditCard:Venture'],eligible_match_ids:['medical','food','unassigned'],matches:['medical','food','unassigned'].map(id=>({match_id:id,filename:id+'.pdf',new_name:id+'.pdf'}))}
+  const api={listenForSyncEvents:async()=>()=>{},getSyncRun:async()=>review,commitLedgerSync:async(id,payload)=>{calls.push({id,payload});return {...review,revision:2,sequence:2,status:'committing'}}}
+  const make=()=>makeSyncRunController({api,selectionStore:store})
+  let controller=make(); await controller.connect()
+  assert.equal(await controller.commit(['medical']),false)
+  assert.equal(controller.assignFunding('medical','Equity:Opening'),false)
+  assert.equal(controller.assignFunding('medical','Assets:Retirement:HSA'),true)
+  assert.equal(controller.assignFunding('food','Liabilities:CreditCard:Venture'),true)
+  assert.equal(await controller.commit(['medical','food','unassigned']),false)
+  assert.equal(await controller.commit(['medical','medical']),false)
+  assert.equal(calls.length,0)
+  controller.dispose();controller=make();await controller.connect()
+  assert.equal(await controller.commit(['medical','food']),true)
+  assert.deepEqual(calls[0].payload,[{matchId:'medical',fundingAccount:'Assets:Retirement:HSA'},{matchId:'food',fundingAccount:'Liabilities:CreditCard:Venture'}])
+  assert.equal(controller.assignFunding('food',''),false)
+  controller.dispose();review={...review,run_id:'next',revision:3};controller=make();await controller.connect()
+  assert.equal(await controller.commit(['medical']),false)
+  controller.dispose()
+})
+
+test('clearing funding blocks approval and stale removed accounts are not reused', () => {
+  const store=createSelectionStore();const run={...snapshot('funding',1,'review'),matches:[{match_id:'m'}]}
+  store.reconcile(run);assert.equal(store.assignFunding(run,'m','Assets:Bank:Checking'),true)
+  assert.equal(store.funding(run).get('m'),'Assets:Bank:Checking')
+  store.assignFunding(run,'m','');assert.equal(store.funding(run).size,0)
+  store.assignFunding(run,'m','Assets:Bank:Checking');store.reconcile({...run,revision:2,funding_accounts:[]})
+  assert.equal(store.funding(run).size,0)
+  assert.equal(canCommitReview(run,true,false,1,false),false)
+})
+
 const deferred = () => { let resolve, reject; const promise = new Promise((r, j) => { resolve = r; reject = j }); return { promise, resolve, reject } }
-const snapshot = (run_id, revision, status = 'idle') => ({ run_id, revision, sequence: revision, status, analysis_outcome: status === 'review' || status === 'committing' || status === 'complete' ? 'success' : status === 'failed' || status === 'cancelled' ? 'failed' : null, logs: [], matches: [], unmatched: [], errors: [], result: null })
+const snapshot = (run_id, revision, status = 'idle') => ({ run_id, revision, sequence: revision, status, analysis_outcome: status === 'review' || status === 'committing' || status === 'complete' ? 'success' : status === 'failed' || status === 'cancelled' ? 'failed' : null, logs: [], matches: [], unmatched: [], errors: [], funding_accounts:['Assets:Bank:Checking'], result: null })
 const event = run => ({ run_id: run.run_id, revision: run.revision, sequence: run.sequence, status: run.status, snapshot: run })
 const createSyncRunController = options => makeSyncRunController({ selectionStore: createSelectionStore(), ...options })
 
@@ -61,8 +93,9 @@ test('duplicate clicks are guarded and review transitions use the bound run', as
   handler.done(event({ ...snapshot('r3', 2, 'review'), matches: [{ match_id:'picked',filename: 'picked.pdf',new_name:'picked.pdf' }] }))
   assert.equal(await controller.commit([{ match_id:'invented' }]), false)
   assert.equal(await controller.commit([{ filename:'picked.pdf' }]), false)
+  controller.assignFunding('picked', 'Assets:Bank:Checking')
   await controller.commit(['picked'])
-  assert.deepEqual(calls[1], ['commit', 'r3', ['picked']])
+  assert.deepEqual(calls[1], ['commit', 'r3', [{matchId:'picked',fundingAccount:'Assets:Bank:Checking'}]])
   controller.dispose()
 })
 
@@ -233,6 +266,7 @@ test('reconnect keeps a pending commit owned until its stale success or rejectio
       commitLedgerSync: () => gate.promise,
     } })
     await controller.connect()
+    controller.assignFunding('m', 'Assets:Bank:Checking')
     const pending = controller.commit(['m'])
     await controller.connect()
     assert.equal(controller.getState().pending, true)
@@ -250,7 +284,7 @@ test('accepted commit reply after reconnect is reconciled to authoritative compl
   const review={...snapshot('run',3,'review'),matches:[{match_id:'m',filename:'a.pdf',new_name:'b.pdf'}]}
   const complete={...review,revision:6,sequence:6,status:'complete',analysis_outcome:'success'}
   const controller=createSyncRunController({api:{listenForSyncEvents:async()=>()=>{},getSyncRun:async()=>++reads===1?review:complete,commitLedgerSync:()=>{commits++;return gate.promise}}})
-  await controller.connect(); const pending=controller.commit(['m']); await controller.connect()
+  await controller.connect(); controller.assignFunding('m','Assets:Bank:Checking'); const pending=controller.commit(['m']); await controller.connect()
   gate.resolve({...review,revision:4,sequence:4,status:'committing'}); assert.equal(await pending,false)
   assert.equal(controller.getState().run.status,'complete'); assert.equal(commits,1); assert.equal(controller.getState().pending,false)
   controller.dispose()
@@ -260,7 +294,7 @@ test('failed command reconciliation leaves the controller unready and blocks dup
   const gate=deferred(); let reads=0; let commits=0
   const review={...snapshot('run',3,'review'),matches:[{match_id:'m',filename:'a.pdf',new_name:'b.pdf'}]}
   const controller=createSyncRunController({api:{listenForSyncEvents:async()=>()=>{},getSyncRun:async()=>{reads++;if(reads===1)return review;if(reads===2)throw new Error('reconnect failed');throw new Error('snapshot unavailable')},commitLedgerSync:()=>{commits++;return gate.promise}}})
-  await controller.connect(); const pending=controller.commit(['m']); await controller.connect()
+  await controller.connect(); controller.assignFunding('m','Assets:Bank:Checking'); const pending=controller.commit(['m']); await controller.connect()
   gate.reject(new Error('transport lost')); assert.equal(await pending,false)
   assert.equal(controller.getState().ready,false); assert.equal(await controller.commit(['m']),false); assert.equal(commits,1)
   controller.dispose()
@@ -270,7 +304,7 @@ test('malformed action response reconciles from native snapshot before clearing 
   let reads=0; const review={...snapshot('r',2,'review'),matches:[{match_id:'m',filename:'a',new_name:'b'}]}
   const complete={...review,revision:5,sequence:5,status:'complete'}
   const controller=createSyncRunController({api:{listenForSyncEvents:async()=>()=>{},getSyncRun:async()=>++reads===1?review:complete,commitLedgerSync:async()=>({status:'broken'})}})
-  await controller.connect(); assert.equal(await controller.commit(['m']),false)
+  await controller.connect(); controller.assignFunding('m','Assets:Bank:Checking'); assert.equal(await controller.commit(['m']),false)
   assert.equal(controller.getState().run.status,'complete'); assert.equal(controller.getState().pending,false)
   controller.dispose()
 })
@@ -340,6 +374,7 @@ test('controller ignores selection toggles while a commit is pending', async () 
   const gate=deferred(); const review={...snapshot('review',2,'review'),matches:[{match_id:'m',filename:'a.pdf',new_name:'b.pdf'}],eligible_match_ids:['m']}
   const views=[]; const controller=createSyncRunController({onChange:view=>views.push(view),api:{listenForSyncEvents:async()=>()=>{},getSyncRun:async()=>review,commitLedgerSync:()=>gate.promise}})
   await controller.connect(); assert.deepEqual([...views.at(-1).selectedIds],['m'])
+  controller.assignFunding('m','Assets:Bank:Checking')
   const committing=controller.commit(['m']); controller.toggle('m'); assert.deepEqual([...views.at(-1).selectedIds],['m'])
   gate.resolve({...review,revision:3,sequence:3,status:'committing'}); await committing; controller.dispose()
 })

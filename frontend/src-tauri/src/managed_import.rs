@@ -10,6 +10,16 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+// Reconciliation also takes exclusive Windows ledger handles. Serialize the
+// application's managed readers and writers so a refresh cannot make an
+// approved batch mistake our own temporary lock for an unavailable ledger.
+static MANAGED_IO: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn managed_io() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    MANAGED_IO
+        .lock()
+        .map_err(|_| "Managed import coordination is unavailable".into())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Receipt {
@@ -55,6 +65,9 @@ pub(crate) struct ImportConfig {
     counter: String,
 }
 impl ImportConfig {
+    pub(crate) fn currency(&self) -> &str {
+        &self.currency
+    }
     /// Explicit dependency injection for native tests and isolated store operations.
     #[cfg(test)]
     pub(crate) fn test_ledger(&self) -> &Path {
@@ -90,6 +103,7 @@ pub(crate) struct PreparedPlan {
     ledger_before: Vec<u8>,
     ledger_before_hash: String,
     entry: String,
+    funding_account: Option<String>,
 }
 impl PreparedPlan {
     pub(crate) fn source_path(&self) -> &Path {
@@ -130,6 +144,106 @@ where
 pub(crate) fn prepare(
     item: &serde_json::Value,
     cfg: &ImportConfig,
+) -> Result<PreparedPlan, String> {
+    let _io = managed_io()?;
+    prepare_inner(item, cfg, Some(&cfg.counter))
+}
+
+pub(crate) fn prepare_review(
+    item: &serde_json::Value,
+    cfg: &ImportConfig,
+) -> Result<PreparedPlan, String> {
+    let _io = managed_io()?;
+    prepare_inner(item, cfg, None)
+}
+
+/// Read declared account names only after validating the complete ledger.
+fn funding_accounts_in(
+    bytes: &[u8],
+    currency: &str,
+    receipt_date: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let text = std::str::from_utf8(bytes).map_err(|_| "Ledger is not valid UTF-8")?;
+    crate::ledger_parser::parse_with_currency(text, currency)
+        .map_err(|_| "Ledger does not validate in the supported subset")?;
+    let mut accounts = std::collections::BTreeSet::new();
+    for line in text
+        .lines()
+        .filter(|line| !line.starts_with(char::is_whitespace))
+    {
+        let fields: Vec<_> = line
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .collect();
+        if fields.len() >= 3
+            && fields[1] == "open"
+            && receipt_date.is_none_or(|date| fields[0] <= date)
+            && account_root_is(fields[2], &["Assets", "Liabilities"])
+            && !fields[2].ends_with(":Unsorted")
+            && !fields[2].ends_with(":Unassigned")
+            && fields.get(3).is_none_or(|unit| *unit == currency)
+        {
+            accounts.insert(fields[2].to_owned());
+        }
+    }
+    Ok(accounts.into_iter().collect())
+}
+
+pub(crate) fn funding_accounts(cfg: &ImportConfig) -> Result<Vec<String>, String> {
+    let _io = managed_io()?;
+    funding_accounts_in(
+        &fs::read(&cfg.ledger).map_err(|_| "Ledger is unavailable")?,
+        &cfg.currency,
+        None,
+    )
+}
+
+/// Bind the reviewer's choice to the original analysis-time source and ledger
+/// evidence. Never re-prepare against newer files while approving an old run.
+pub(crate) fn assign_funding(
+    mut plan: PreparedPlan,
+    cfg: &ImportConfig,
+    account: &str,
+) -> Result<PreparedPlan, String> {
+    let _io = managed_io()?;
+    if !funding_accounts_in(
+        &plan.ledger_before,
+        &cfg.currency,
+        plan.item["date"].as_str(),
+    )?
+    .iter()
+    .any(|a| a == account)
+    {
+        return Err("Select an existing funding account; unassigned and placeholder accounts cannot be approved".into());
+    }
+    let operation = identity(&cfg.ledger, &plan.source_hash);
+    let entry = build_entry(&plan.item, "", &operation, &cfg.currency, account)?;
+    if let Ok(raw) = fs::read(cfg.store.join(format!("{operation}.json"))) {
+        let prior: Receipt =
+            serde_json::from_slice(&raw).map_err(|_| "Prior import receipt is invalid")?;
+        if !receipt_valid(&prior, &format!("{operation}.json"), cfg) || prior.entry != entry {
+            return Err("Existing import is bound to a different reviewed entry; reconcile it before changing funding".into());
+        }
+    }
+    let mut candidate = plan.ledger_before.clone();
+    if !candidate.is_empty() && !candidate.ends_with(b"\n") {
+        candidate.push(b'\n');
+    }
+    candidate.extend_from_slice(entry.as_bytes());
+    crate::ledger_parser::parse_with_currency(
+        std::str::from_utf8(&candidate).map_err(|_| "Ledger is not valid UTF-8")?, &cfg.currency,
+    ).map_err(|_| "Selected funding account or transaction does not validate for this receipt date and currency")?;
+    plan.entry = entry;
+    plan.funding_account = Some(account.to_owned());
+    Ok(plan)
+}
+
+fn prepare_inner(
+    item: &serde_json::Value,
+    cfg: &ImportConfig,
+    funding: Option<&str>,
 ) -> Result<PreparedPlan, String> {
     let filename = item["filename"]
         .as_str()
@@ -185,7 +299,22 @@ pub(crate) fn prepare(
         return Err("Archive destination already exists".into());
     }
     let ledger_before = fs::read(&cfg.ledger).map_err(|_| "Ledger is unavailable")?;
-    let entry = build_entry(item, "", &operation_id, &cfg.currency, &cfg.counter)?;
+    // Validate analyzer tokens without choosing a default funding account.
+    let validated_entry = build_entry(
+        item,
+        "",
+        &operation_id,
+        &cfg.currency,
+        funding.unwrap_or("Assets:FundingPending"),
+    )?;
+    let entry = if funding.is_some() {
+        validated_entry
+    } else {
+        String::new()
+    };
+    if funding.is_none() {
+        funding_accounts_in(&ledger_before, &cfg.currency, None)?;
+    }
     if !entry.is_empty() {
         let mut candidate = ledger_before.clone();
         if !candidate.is_empty() && !candidate.ends_with(b"\n") {
@@ -206,6 +335,7 @@ pub(crate) fn prepare(
         ledger_before_hash: hash(&ledger_before),
         ledger_before,
         entry,
+        funding_account: funding.map(str::to_owned),
     })
 }
 
@@ -670,6 +800,10 @@ pub fn outcomes(ledger_path: &str) -> Vec<ItemOutcome> {
 }
 
 fn outcomes_with_config(cfg: &ImportConfig) -> Vec<ItemOutcome> {
+    let _io = match managed_io() {
+        Ok(guard) => guard,
+        Err(message) => return vec![store_error(&message)],
+    };
     let ledger = &cfg.ledger;
     let dir = &cfg.store;
     let _guard = match journal_lock(dir) {
@@ -931,7 +1065,13 @@ fn batch_preflight(items: &[serde_json::Value], cfg: &ImportConfig) -> Vec<Optio
             let source = fs::canonicalize(cfg.inbox.join(filename));
             let source_check = (|| -> Result<(), String> {
                 let operation = identity(&cfg.ledger, expected_hash);
-                let entry = build_entry(item, "", &operation, &cfg.currency, &cfg.counter)?;
+                let entry = build_entry(
+                    item,
+                    "",
+                    &operation,
+                    &cfg.currency,
+                    prepared_counter(item, &cfg.counter),
+                )?;
                 if item
                     .get("_prepared_entry")
                     .and_then(serde_json::Value::as_str)
@@ -1054,6 +1194,10 @@ fn retry_with_config_cancellable(
     cfg: ImportConfig,
     mut cancelled: impl FnMut() -> bool,
 ) -> Vec<ItemOutcome> {
+    let _io = match managed_io() {
+        Ok(guard) => guard,
+        Err(message) => return vec![store_error(&message)],
+    };
     let _journal = match journal_lock(&cfg.store) {
         Ok(g) => g,
         Err(_) => {
@@ -1768,7 +1912,13 @@ fn commit_with_config_cancellable(
             }
             let dest_parent = dest.parent().ok_or("Invalid archive destination")?;
             reject_reparse_ancestry(dest_parent)?;
-            let entry = build_entry(&item, run_id, &op, &currency, &counter)?;
+            let entry = build_entry(
+                &item,
+                run_id,
+                &op,
+                &currency,
+                prepared_counter(&item, &counter),
+            )?;
             if item
                 .get("_prepared_entry")
                 .and_then(serde_json::Value::as_str)
@@ -1998,6 +2148,23 @@ pub(crate) fn commit_prepared_cancellable(
     cfg: ImportConfig,
     cancelled: impl FnMut() -> bool,
 ) -> Vec<ItemOutcome> {
+    let _io = match managed_io() {
+        Ok(guard) => guard,
+        Err(message) => return vec![store_error(&message)],
+    };
+    if plans.iter().any(|(_, plan)| plan.funding_account.is_none()) {
+        return plans
+            .into_iter()
+            .map(|(item_id, plan)| ItemOutcome {
+                item_id,
+                filename: plan.item["filename"].as_str().unwrap_or("").to_owned(),
+                state: "failed".into(),
+                retry_safe: false,
+                message: "Every selected receipt requires an assigned funding account".into(),
+                operation_id: None,
+            })
+            .collect();
+    }
     let current_ledger = fs::read(&cfg.ledger).ok();
     let mut items = Vec::with_capacity(plans.len());
     for (id, plan) in plans {
@@ -2013,10 +2180,17 @@ pub(crate) fn commit_prepared_cancellable(
             .as_ref()
             .is_some_and(|bytes| bytes.as_slice() == plan.ledger_before.as_slice()));
         item["_prepared_entry"] = serde_json::json!(plan.entry);
+        item["_prepared_funding_account"] = serde_json::json!(plan.funding_account);
         item["_prepared_ledger_backup"] = serde_json::json!(plan.ledger_before);
         items.push(item);
     }
     commit_with_config_cancellable(items, run_id, cfg, FaultPlan::default(), cancelled)
+}
+
+fn prepared_counter<'a>(item: &'a serde_json::Value, fallback: &'a str) -> &'a str {
+    item.get("_prepared_funding_account")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(fallback)
 }
 
 #[cfg(test)]
@@ -2024,6 +2198,160 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(windows)]
+    fn funding_fixture() -> (PathBuf, ImportConfig, serde_json::Value) {
+        let (dir, mut cfg, item) = fixture();
+        cfg.counter = "Assets:Bank:Legacy:Unsorted".into();
+        fs::write(
+            &cfg.ledger,
+            concat!(
+                "2020-01-01 open Assets:Bank:Checking USD\n",
+                "2020-01-01 open Assets:Retirement:HSA USD\n",
+                "2020-01-01 open Liabilities:CreditCard:Venture USD\n",
+                "2020-01-01 open Assets:Bank:Legacy:Unsorted USD\n",
+                "2020-01-01 open Equity:Opening USD\n",
+                "2020-01-01 open Expenses:Food USD\n",
+                "2020-01-01 open Assets:Foreign TWD\n",
+                "2027-01-01 open Assets:Future USD\n",
+            "2020-01-02 * \"Synthetic opening\"\n  Expenses:Food 0 USD\n  Assets:Bank:Checking 0 USD\n",
+            ),
+        )
+        .unwrap();
+        (dir, cfg, item)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn review_has_no_default_funding_and_unassigned_or_invalid_accounts_fail_closed() {
+        let (_dir, cfg, item) = funding_fixture();
+        let before = fs::read(&cfg.ledger).unwrap();
+        let plan = prepare_review(&item, &cfg).unwrap();
+        assert!(plan.funding_account.is_none());
+        assert!(plan.entry.is_empty());
+        let options = funding_accounts(&cfg).unwrap();
+        assert!(options.contains(&"Assets:Retirement:HSA".into()));
+        assert!(!options.contains(&cfg.counter));
+        assert!(!options.contains(&"Assets:Foreign".into()));
+        for bad in [
+            "",
+            "Assets:Unknown",
+            "Equity:Opening",
+            "Expenses:Food",
+            "Assets:Bank:Legacy:Unsorted",
+            "Assets:Foreign",
+            "Assets:Future",
+        ] {
+            assert!(assign_funding(plan.clone(), &cfg, bad).is_err(), "{bad}");
+        }
+        let out = commit_prepared(vec![("unassigned".into(), plan)], "blocked", cfg.clone());
+        assert_eq!(out[0].state, "failed");
+        assert_eq!(fs::read(&cfg.ledger).unwrap(), before);
+        assert_eq!(fs::read_dir(&cfg.archive).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mixed_review_uses_each_funding_account_and_cannot_retarget_a_prior_import() {
+        let (_dir, cfg, first) = funding_fixture();
+        fs::write(cfg.inbox.join("second.pdf"), b"second receipt bytes").unwrap();
+        let mut second = first.clone();
+        second["filename"] = serde_json::json!("second.pdf");
+        second["new_name"] = serde_json::json!("second 2026-10-23.pdf");
+        second["amount"] = serde_json::json!("56.78");
+        let before = fs::read(&cfg.ledger).unwrap();
+        let a = assign_funding(
+            prepare_review(&first, &cfg).unwrap(),
+            &cfg,
+            "Assets:Retirement:HSA",
+        )
+        .unwrap();
+        let b = prepare_review(&second, &cfg).unwrap();
+        let blocked = commit_prepared(
+            vec![("a".into(), a.clone()), ("b".into(), b.clone())],
+            "mixed-blocked",
+            cfg.clone(),
+        );
+        assert!(blocked.iter().all(|r| r.state == "failed"));
+        assert_eq!(fs::read(&cfg.ledger).unwrap(), before);
+        let b = assign_funding(b, &cfg, "Liabilities:CreditCard:Venture").unwrap();
+        let out = commit_prepared(vec![("a".into(), a), ("b".into(), b)], "mixed", cfg.clone());
+        assert!(out.iter().all(|r| r.state == "succeeded"), "{out:?}");
+        let after = fs::read(&cfg.ledger).unwrap();
+        assert!(after.starts_with(&before));
+        let appended = std::str::from_utf8(&after[before.len()..]).unwrap();
+        assert!(appended.contains("Assets:Retirement:HSA -12.34 USD"));
+        assert!(appended.contains("Liabilities:CreditCard:Venture -56.78 USD"));
+        assert!(!appended.contains("Legacy:Unsorted"));
+        assert!(assign_funding(
+            prepare_review(&first, &cfg).unwrap(),
+            &cfg,
+            "Liabilities:CreditCard:Venture"
+        )
+        .is_err());
+        let repeat = assign_funding(
+            prepare_review(&first, &cfg).unwrap(),
+            &cfg,
+            "Assets:Retirement:HSA",
+        )
+        .unwrap();
+        assert_eq!(
+            commit_prepared(vec![("again".into(), repeat)], "repeat", cfg.clone())[0].state,
+            "succeeded"
+        );
+        assert_eq!(fs::read(&cfg.ledger).unwrap(), after);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn funding_binding_keeps_analysis_time_ledger_evidence() {
+        let (_dir, cfg, item) = funding_fixture();
+        let plan = prepare_review(&item, &cfg).unwrap();
+        let mut changed = fs::read(&cfg.ledger).unwrap();
+        changed.extend_from_slice(b"; unrelated concurrent edit\n");
+        fs::write(&cfg.ledger, &changed).unwrap();
+        let plan = assign_funding(plan, &cfg, "Assets:Retirement:HSA").unwrap();
+        assert_eq!(
+            commit_prepared(vec![("stale".into(), plan)], "stale", cfg.clone())[0].state,
+            "failed"
+        );
+        assert_eq!(fs::read(&cfg.ledger).unwrap(), changed);
+        assert_eq!(fs::read_dir(&cfg.archive).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn managed_refresh_lock_cannot_make_a_funded_commit_report_ledger_unavailable() {
+        let (_dir, cfg, item) = funding_fixture();
+        let plan = assign_funding(
+            prepare_review(&item, &cfg).unwrap(),
+            &cfg,
+            "Assets:Retirement:HSA",
+        )
+        .unwrap();
+        let refresh = managed_io().unwrap();
+        let ledger_handle = exclusive(&cfg.ledger, false).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker_cfg = cfg.clone();
+        let worker = std::thread::spawn(move || {
+            tx.send(commit_prepared(
+                vec![("funded".into(), plan)],
+                "coordinated",
+                worker_cfg,
+            ))
+            .unwrap();
+        });
+        assert!(matches!(
+            rx.recv_timeout(std::time::Duration::from_millis(30)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(ledger_handle);
+        drop(refresh);
+        let outcomes = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        worker.join().unwrap();
+        assert_eq!(outcomes[0].state, "succeeded", "{outcomes:?}");
+        assert_eq!(outcomes_with_config(&cfg)[0].state, "succeeded");
+    }
     #[test]
     fn production_validation_rejects_windows_escape_names_and_bad_dates() {
         for name in ["../x.pdf", "C:secret.pdf", "CON.pdf", "bad. ", "x:y.pdf"] {
