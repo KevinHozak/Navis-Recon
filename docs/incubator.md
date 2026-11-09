@@ -74,6 +74,8 @@ This feature should help answer “what will need attention soon?” without pre
 
 ### PDF statement library
 
+Detailed proposal: [PDF statement library plan](pdf-statement-library-plan.md), including phased delivery, data ownership, and acceptance criteria. Implementation is not yet approved or started.
+
 Navis-Recon could provide a dedicated way to index and view household PDF statements without making the application the authoritative storage system for every document.
 
 - Browse statements by account, institution, statement type, and reporting period
